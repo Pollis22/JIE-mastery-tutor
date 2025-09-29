@@ -1,0 +1,354 @@
+Sweet — here’s a clean, drop-in task you can paste to **Agent 3** to add the **embedding retry worker + graceful quota handling**. It includes schema updates, server code, and small UI tweaks.
+
+---
+
+# Agent 3 — Implement Embedding Retry + Graceful Quota Handling
+
+## Goal
+
+Make document embeddings robust to **429 (quota)** and other transient errors:
+
+* New statuses: `queued | processing | ready | error`
+* Automatic retries with exponential backoff
+* Frontend shows status and disables “Use” until `ready`
+* No blocking UX — uploads appear immediately; embeddings happen in the background
+
+---
+
+## 1) ENV
+
+Add an optional env for cheaper embeddings while testing:
+
+```
+EMBED_MODEL=text-embedding-3-small
+```
+
+---
+
+## 2) Server: Schema Ensure (SQLite)
+
+Create/extend `server/db/migrations/ensureDocuments.ts` (or add to your existing schema ensure). Run at server start.
+
+```ts
+// server/db/migrations/ensureDocuments.ts
+import Database from 'better-sqlite3';
+export function ensureDocumentsSchema(db: Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      title TEXT,
+      subject TEXT,
+      grade TEXT,
+      mime TEXT,
+      size INTEGER,
+      created_at INTEGER NOT NULL,
+      -- NEW: embedding pipeline status
+      status TEXT NOT NULL DEFAULT 'queued',
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      next_retry_at INTEGER,
+      last_error TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS doc_chunks (
+      id TEXT PRIMARY KEY,
+      doc_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      FOREIGN KEY(doc_id) REFERENCES documents(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS doc_vectors (
+      id TEXT PRIMARY KEY,
+      doc_id TEXT NOT NULL,
+      chunk_id TEXT NOT NULL,
+      vector BLOB NOT NULL, -- store JSON stringified Float32Array or msgpack; we’ll use JSON
+      FOREIGN KEY(doc_id) REFERENCES documents(id),
+      FOREIGN KEY(chunk_id) REFERENCES doc_chunks(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id);
+    CREATE INDEX IF NOT EXISTS idx_docs_status_next ON documents(status, next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_vectors_doc ON doc_vectors(doc_id);
+  `);
+
+  // add missing columns for existing installs (safe IF NOT EXISTS-ish pattern)
+  const cols = db.prepare(`PRAGMA table_info('documents')`).all();
+  const have = (name:string) => cols.some(c => c.name === name);
+  if (!have('status')) db.exec(`ALTER TABLE documents ADD COLUMN status TEXT NOT NULL DEFAULT 'queued'`);
+  if (!have('retry_count')) db.exec(`ALTER TABLE documents ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`);
+  if (!have('next_retry_at')) db.exec(`ALTER TABLE documents ADD COLUMN next_retry_at INTEGER`);
+  if (!have('last_error')) db.exec(`ALTER TABLE documents ADD COLUMN last_error TEXT`);
+}
+```
+
+Wire it in `server/index.ts` (or your db bootstrap):
+
+```ts
+import Database from 'better-sqlite3';
+import { ensureDocumentsSchema } from './db/migrations/ensureDocuments';
+// ...
+const db = new Database('app.db');
+ensureDocumentsSchema(db);
+// pass db into your repos as needed
+```
+
+---
+
+## 3) Server: Embedding Helpers
+
+### `server/embeddings/openai.ts`
+
+```ts
+import OpenAI from 'openai';
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const MODEL = process.env.EMBED_MODEL || 'text-embedding-3-small';
+
+export async function embedText(text: string) {
+  let delay = 400;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await client.embeddings.create({ model: MODEL, input: text });
+      return res.data[0].embedding;
+    } catch (err: any) {
+      const status = err?.status || err?.response?.status;
+      if (status === 429 && attempt < 2) {
+        await new Promise(r => setTimeout(r, delay));
+        delay *= 2;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+```
+
+### `server/embeddings/chunking.ts`
+
+(If you already have chunking, keep yours; otherwise add a simple one.)
+
+```ts
+import { nanoid } from 'nanoid';
+
+export async function chunkDocument(fullText: string, maxTokens=700) {
+  // naive by length; replace with token-aware if you have it
+  const chunks: { id: string; text: string }[] = [];
+  const para = fullText.split(/\n{2,}/g).map(s => s.trim()).filter(Boolean);
+  let buf = '';
+  let ord = 0;
+  for (const p of para) {
+    if ((buf + '\n\n' + p).length > maxTokens * 4 && buf) {
+      chunks.push({ id: nanoid(), text: buf.trim() });
+      buf = '';
+      ord++;
+    }
+    buf += (buf ? '\n\n' : '') + p;
+  }
+  if (buf) chunks.push({ id: nanoid(), text: buf.trim() });
+  return chunks.map((c, i) => ({ ...c, ordinal: i }));
+}
+```
+
+### `server/embeddings/store.ts`
+
+```ts
+import Database from 'better-sqlite3';
+
+export function makeEmbeddingStore(db: Database) {
+  const getQueuedDocs = db.prepare(`
+    SELECT * FROM documents
+    WHERE status='queued'
+      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+    ORDER BY COALESCE(next_retry_at, 0) ASC
+    LIMIT ?
+  `);
+
+  const updateStatus = db.prepare(`UPDATE documents SET status=?, last_error=? WHERE id=?`);
+  const setProcessing = db.prepare(`UPDATE documents SET status='processing', last_error=NULL WHERE id=?`);
+  const setReady = db.prepare(`UPDATE documents SET status='ready', retry_count=0, next_retry_at=NULL, last_error=NULL WHERE id=?`);
+  const incRetry = db.prepare(`UPDATE documents SET retry_count=retry_count+1, next_retry_at=?, last_error=? WHERE id=?`);
+  const setError = db.prepare(`UPDATE documents SET status='error', last_error=? WHERE id=?`);
+
+  const insertChunk = db.prepare(`INSERT INTO doc_chunks (id, doc_id, ordinal, text) VALUES (?, ?, ?, ?)`);
+  const insertVector = db.prepare(`INSERT INTO doc_vectors (id, doc_id, chunk_id, vector) VALUES (?, ?, ?, ?)`);
+
+  const clearDocVectors = db.prepare(`DELETE FROM doc_vectors WHERE doc_id=?`);
+  const clearDocChunks = db.prepare(`DELETE FROM doc_chunks WHERE doc_id=?`);
+
+  return {
+    getQueuedDocs: (limit=5) => getQueuedDocs.all(Date.now(), limit),
+    markProcessing: (id:string) => setProcessing.run(id),
+    markReady: (id:string) => setReady.run(id),
+    markError: (id:string, msg:string) => setError.run(msg, id),
+
+    scheduleNextRetry(id:string, errorMsg:string, currentRetry:number, maxRetries:number) {
+      if (currentRetry >= maxRetries) return false;
+      // exponential: 1m, 2m, 4m, 8m, ...
+      const minutes = Math.pow(2, currentRetry);
+      const next = Date.now() + minutes * 60_000;
+      incRetry.run(next, errorMsg, id);
+      return true;
+    },
+
+    async saveChunksAndVectors(docId: string, chunks: Array<{id:string; text:string; ordinal:number}>, vectors: Array<{chunk_id:string; vector:number[]}>) {
+      const tx = db.transaction(() => {
+        clearDocVectors.run(docId);
+        clearDocChunks.run(docId);
+        for (const c of chunks) insertChunk.run(c.id, docId, c.ordinal, c.text);
+        for (const v of vectors) insertVector.run(v.chunk_id, docId, v.chunk_id, JSON.stringify(v.vector));
+      });
+      tx();
+    },
+  };
+}
+```
+
+### `server/embeddings/retryWorker.ts`
+
+```ts
+import Database from 'better-sqlite3';
+import { embedText } from './openai';
+import { chunkDocument } from './chunking';
+import { makeEmbeddingStore } from './store';
+import { loadFullTextForDoc } from '../services/docTextLoader'; // implement using your parsed text storage
+
+const MAX_RETRIES = 8;
+
+export function startEmbeddingWorker(db: Database) {
+  const store = makeEmbeddingStore(db);
+
+  const tick = async () => {
+    try {
+      const docs:any[] = await store.getQueuedDocs(5);
+      for (const doc of docs) {
+        try {
+          store.markProcessing(doc.id);
+
+          const fullText = await loadFullTextForDoc(doc); // read from parsed text blob
+          const chunks = await chunkDocument(fullText);
+          const vectors:any[] = [];
+
+          for (const c of chunks) {
+            const v = await embedText(c.text);
+            vectors.push({ chunk_id: c.id, vector: v });
+          }
+
+          await store.saveChunksAndVectors(doc.id, chunks, vectors);
+          store.markReady(doc.id);
+        } catch (err:any) {
+          const msg = err?.message || String(err);
+          const scheduled = store.scheduleNextRetry(doc.id, msg, doc.retry_count ?? 0, MAX_RETRIES);
+          if (!scheduled) {
+            store.markError(doc.id, msg);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[embedding-worker] loop error', e);
+    }
+  };
+
+  // run immediately & every 2 minutes
+  tick();
+  setInterval(tick, 120_000);
+}
+```
+
+> **Note:** Implement `loadFullTextForDoc(doc)` to return the **plain text** you already parsed/stored from PDF/DOCX (your pipeline likely has this; otherwise read `storage_path` and parse on demand).
+
+---
+
+## 4) Server: Update Upload Handler
+
+Wherever the document record is inserted (e.g., `server/routes/assignments.ts`), **set status to `'queued'`** at insert time:
+
+```ts
+db.prepare(`
+  INSERT INTO documents (id, user_id, filename, storage_path, title, subject, grade, mime, size, created_at, status)
+  VALUES (@id, @user_id, @filename, @storage_path, @title, @subject, @grade, @mime, @size, @created_at, 'queued')
+`).run(docRow);
+```
+
+If you previously attempted embeddings in the upload request, **remove the synchronous embedding step**. The worker will pick it up automatically.
+
+---
+
+## 5) Server: Start Worker
+
+In `server/index.ts` (after DB init and before/after `app.listen`), start the worker:
+
+```ts
+import { startEmbeddingWorker } from './embeddings/retryWorker';
+// ...
+startEmbeddingWorker(db);
+```
+
+---
+
+## 6) API: Document List Must Return Status
+
+Ensure `/api/documents/list` returns fields: `id, title, subject, grade, status, retry_count, last_error`. (If not already.)
+
+---
+
+## 7) Frontend: UI Tweaks in AssignmentsPanel
+
+* **Disable** “Use” checkbox unless `status === 'ready'`.
+* Show a small status pill.
+
+```tsx
+// inside your row renderer
+function StatusPill({ status, last_error }: {status:string; last_error?:string}) {
+  const map:any = {
+    ready: { label: 'Ready', className: 'pill ready' },
+    processing: { label: 'Processing', className: 'pill processing' },
+    queued: { label: 'Queued', className: 'pill queued' },
+    error: { label: 'Error', className: 'pill error', title: last_error || 'Embedding error' },
+  };
+  const s = map[status] || { label: status, className: 'pill' };
+  return <span className={s.className} title={s.title}>{s.label}</span>;
+}
+
+// Use checkbox
+<input
+  type="checkbox"
+  checked={selectedIds.includes(doc.id)}
+  disabled={doc.status !== 'ready'}
+  onChange={(e)=> toggleSelection(doc.id, e.target.checked)}
+/>
+```
+
+Add quick CSS (or Tailwind equivalents):
+
+```css
+.pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+.pill.ready { background:#e7f5ff; color:#0969da; border:1px solid #54aeff; }
+.pill.processing { background:#fff3bf; color:#8c6d1f; border:1px solid #ffd43b; }
+.pill.queued { background:#f6f8fa; color:#57606a; border:1px solid #d0d7de; }
+.pill.error { background:#fee; color:#d73a49; border:1px solid #ffb3b8; }
+```
+
+---
+
+## 8) Testing Checklist
+
+1. Upload PDFs/DOCX/TXT → should appear **Queued** immediately.
+2. With low/empty OpenAI quota, status flips `queued → processing → queued` as retries schedule; `last_error` populated.
+3. When quota is restored, worker completes → **Ready**. “Use” checkbox becomes enabled.
+4. Start a session with ready docs → tutor loads context normally.
+
+---
+
+## Notes / Integration Pointers
+
+* We intentionally **don’t** block the upload response waiting for embeddings.
+* Exponential backoff is controlled in DB via `retry_count` & `next_retry_at`.
+* If you already store parsed text per doc, call it in `loadFullTextForDoc`. Otherwise, parse `storage_path` lazily using your existing parser.
+* No changes required to your context endpoints—just ensure they query only **ready** vectors when building prompt context.
+
+---
+
+If anything is unclear in your current file layout, I can map these snippets exactly onto your repo structure. But this should be everything Agent 3 needs to implement the retry worker cleanly.
