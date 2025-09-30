@@ -1,0 +1,126 @@
+Good question! Let's troubleshoot the ElevenLabs voice agent connection issue. Here are the most common causes and solutions:
+
+## Common Issues with ElevenLabs Voice in Replit
+
+### 1. **Browser Permissions**
+The most common issue - browsers block microphone access by default:
+
+```javascript
+// Add this check before initializing the voice agent
+async function checkMicrophonePermission() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(track => track.stop());
+    console.log('Microphone access granted');
+    return true;
+  } catch (error) {
+    console.error('Microphone access denied:', error);
+    alert('Please allow microphone access to use the voice tutor');
+    return false;
+  }
+}
+```
+
+### 2. **HTTPS Requirement**
+ElevenLabs voice agents require HTTPS. Replit preview URLs should be HTTPS, but verify:
+- Check if your URL starts with `https://`
+- If using a custom domain, ensure SSL is configured
+
+### 3. **WebSocket Connection Issues**
+ElevenLabs uses WebSockets for real-time audio. Check for:
+
+```javascript
+// Add connection status logging
+const conversationId = await conversation.startSession({
+  agentId: "your-agent-id"
+});
+
+conversation.on('connected', () => {
+  console.log('✅ Connected to ElevenLabs');
+});
+
+conversation.on('disconnected', () => {
+  console.log('❌ Disconnected from ElevenLabs');
+});
+
+conversation.on('error', (error) => {
+  console.error('ElevenLabs error:', error);
+});
+```
+
+### 4. **Audio Context Issues**
+Modern browsers require user interaction before playing audio:
+
+```javascript
+// Initialize audio context on button click
+document.getElementById('startButton').addEventListener('click', async () => {
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  const audioContext = new AudioContext();
+  
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume();
+  }
+  
+  // Then start your ElevenLabs session
+  await startVoiceSession();
+});
+```
+
+### 5. **API Key & Agent ID Verification**
+Even though you mentioned they're configured properly, double-check:
+
+```javascript
+// Log (without exposing the full key)
+console.log('Agent ID:', agentId);
+console.log('API Key present:', !!apiKey);
+console.log('API Key length:', apiKey?.length);
+```
+
+### 6. **Replit-Specific Issues**
+
+Add these to your HTML:
+```html
+<!-- Ensure proper audio element setup -->
+<audio id="audioElement" autoplay></audio>
+```
+
+And in your JavaScript:
+```javascript
+// Force audio element initialization
+const audioElement = document.getElementById('audioElement');
+audioElement.muted = false;
+audioElement.volume = 1.0;
+```
+
+### 7. **Check Browser Console**
+Open DevTools (F12) and look for:
+- Red error messages
+- WebSocket connection failures
+- CORS errors
+- Permission denied messages
+
+## Quick Debugging Steps
+
+1. **Add verbose logging** to your voice initialization:
+```javascript
+console.log('🎤 Initializing ElevenLabs...');
+console.log('Agent ID:', agentId);
+console.log('Browser:', navigator.userAgent);
+console.log('HTTPS:', window.location.protocol === 'https:');
+```
+
+2. **Test in different browsers**: Chrome usually has the best WebRTC support
+
+3. **Check ElevenLabs dashboard**: Verify your agent is active and not rate-limited
+
+4. **Try the minimal example** from ElevenLabs docs to isolate the issue
+
+## What to Check Next
+
+Can you share:
+1. Any error messages from the browser console?
+2. Which browser you're testing in?
+3. Does the "Start Learning" button trigger any console logs?
+4. Do you see any network activity in the Network tab when clicking the button?
+
+This will help me pinpoint the exact issue!
