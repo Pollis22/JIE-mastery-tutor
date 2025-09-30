@@ -1,0 +1,263 @@
+Here’s a clean, copy-paste prompt for **Agent3** to fix the auth screen and error toast, and to remove the test banner.
+
+---
+
+# Task: Fix Login/Create Account, Accessible Error Toast, Remove Test Banner
+
+## Problems reported
+
+1. **Sign in / Create account do not work** on `/auth`.
+2. **Error toast unreadable** (red rectangle popup appears but text contrast is too low).
+3. **“Test login: …” helper banner** at the top should be removed in production.
+
+## Goals
+
+* Implement working **email + password** registration and login.
+* Show **clear, accessible error messages** (“Invalid email or password”) with proper color contrast.
+* **Remove** the “Test login” banner from the auth page.
+* Keep the current session model consistent with the rest of the app (session cookie used by tutor page).
+* Production-safe defaults (hashing, validation, basic rate limiting).
+
+---
+
+## Implementation Plan
+
+### 1) Backend: real auth endpoints
+
+**Files to add/modify**
+
+* `server/routes/auth.ts` (new)
+* `server/index.ts` (register the router)
+* `server/db.ts` or `server/services/userService.ts` (whichever is our DB access layer)
+* `scripts/schema.sql` (or migration): add `users` table if not present
+* `.env` / Replit Secrets: `AUTH_JWT_SECRET`
+
+**Users table (SQLite)**
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  username TEXT UNIQUE NOT NULL,
+  first_name TEXT,
+  last_name TEXT,
+  password_hash TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+```
+
+**Auth routes (JWT + httpOnly cookie)**
+Create `server/routes/auth.ts`:
+
+```ts
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { v4 as uuid } from 'uuid';
+import rateLimit from 'express-rate-limit';
+import { db } from '../db'; // or wherever our DB helper lives
+
+const AUTH_COOKIE = 'jid';
+const JWT_SECRET = process.env.AUTH_JWT_SECRET!;
+const router = Router();
+
+const limiter = rateLimit({ windowMs: 60_000, max: 30 });
+
+router.post('/auth/register', limiter, async (req, res) => {
+  try {
+    const { email, username, firstName, lastName, password } = req.body || {};
+    if (!email || !username || !password) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const existing = db.prepare('SELECT id FROM users WHERE email = ? OR username = ?').get(email, username);
+    if (existing) return res.status(409).json({ error: 'Email or username already in use' });
+
+    const password_hash = await bcrypt.hash(password, 11);
+    const id = uuid();
+
+    db.prepare(`
+      INSERT INTO users (id, email, username, first_name, last_name, password_hash)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, email, username, firstName || null, lastName || null, password_hash);
+
+    const token = jwt.sign({ uid: id }, JWT_SECRET, { expiresIn: '7d' });
+    res.cookie(AUTH_COOKIE, token, {
+      httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7 * 24 * 3600 * 1000,
+    });
+    return res.json({ ok: true, userId: id });
+  } catch (e) {
+    console.error('register error', e);
+    return res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+router.post('/auth/login', limiter, async (req, res) => {
+  try {
+    const { emailOrUsername, password } = req.body || {};
+    if (!emailOrUsername || !password) {
+      return res.status(400).json({ error: 'Missing credentials' });
+    }
+    const user = db.prepare(
+      'SELECT * FROM users WHERE email = ? OR username = ?'
+    ).get(emailOrUsername, emailOrUsername);
+
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const token = jwt.sign({ uid: user.id }, JWT_SECRET, { expiresIn: '7d' });
+    res.cookie(AUTH_COOKIE, token, {
+      httpOnly: true, sameSite: 'lax', secure: true, maxAge: 7 * 24 * 3600 * 1000,
+    });
+    return res.json({ ok: true, userId: user.id });
+  } catch (e) {
+    console.error('login error', e);
+    return res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+router.post('/auth/logout', (req, res) => {
+  res.clearCookie(AUTH_COOKIE, { httpOnly: true, sameSite: 'lax', secure: true });
+  res.json({ ok: true });
+});
+
+export default router;
+```
+
+**Wire the router in `server/index.ts`**
+
+```ts
+import authRouter from './routes/auth';
+// ... existing imports
+app.use('/api', authRouter);
+```
+
+**Add secret**
+
+* In Replit → Secrets: `AUTH_JWT_SECRET = <random-32+ chars>`
+
+---
+
+### 2) Frontend: make `/auth` page functional and remove test banner
+
+**Files to update**
+
+* `client/src/pages/auth.tsx` (or wherever the auth UI lives)
+* `client/src/components/Toast.tsx` (or the error banner component)
+* `client/src/styles` to ensure accessible colors
+
+**Remove the test banner**
+
+* Delete the “Test login: [test@example.com](mailto:test@example.com) / TestPass123!” helper text and any conditional that renders it.
+
+**Hook up form actions**
+
+* **Sign In**: POST `/api/auth/login` with `{ emailOrUsername, password }`.
+* **Create Account**: POST `/api/auth/register` with `{ email, username, firstName, lastName, password }`.
+* On success: redirect to tutor home (or set state to show they’re signed in).
+* On failure: show toast “Invalid email or password” (401) or the provided message.
+
+Example (pseudo React):
+
+```ts
+const onRegister = async () => {
+  setLoading(true);
+  setError(null);
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, username, firstName, lastName, password }),
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Registration failed');
+    // success → navigate
+    navigate('/tutor');
+  } catch (e:any) {
+    showToast(e.message || 'Registration failed', 'error');
+  } finally {
+    setLoading(false);
+  }
+};
+```
+
+---
+
+### 3) Accessible error toast (fix contrast)
+
+**Goal:** Red background with **white** text, sufficient contrast; ensure screen readers announce.
+
+Update the toast component styles:
+
+```css
+.toast-error {
+  background: #B3261E; /* Material red tone with good contrast */
+  color: #FFFFFF;
+  border: 1px solid #7F1D1D;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.toast {
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+}
+.toast[role="alert"] { /* assertive announcement */
+  aria-live: assertive;
+}
+```
+
+Ensure the error message text is readable (no translucent overlays). If we’re using an absolute positioned bar, increase padding and font-size slightly so it’s legible.
+
+Message copy to use on 401:
+`"Invalid email or password"`
+
+Do not leak which field was wrong.
+
+---
+
+### 4) Session check helper
+
+If any middleware currently returns a fake user for dev, remove that for production. Ensure tutor pages check the `jid` cookie JWT to get `req.userId`. If we already have such middleware, keep it; just make sure login/register set the cookie and logout clears it.
+
+---
+
+### 5) Rate limiting & security
+
+* Already using `rateLimit` on auth routes.
+* Ensure `helmet()` is enabled in `server/index.ts`.
+* Validate inputs on both client and server.
+
+---
+
+## Acceptance Criteria
+
+1. **Create Account** with a new email/username completes and navigates to the tutor page.
+2. **Sign In** with valid credentials logs in; invalid creds show readable “Invalid email or password”.
+3. The **red error toast** is readable (white text on red, WCAG contrast).
+4. The **“Test login …”** banner no longer appears anywhere on `/auth`.
+5. Refresh preserves session (cookie present); **Logout** clears session and returns to `/auth`.
+
+---
+
+## Testing notes
+
+* Try register with existing email → shows “Email or username already in use”.
+* Try short password (<8) → “Password must be at least 8 characters”.
+* Try invalid login → shows “Invalid email or password”.
+* Confirm cookie `jid` is set (httpOnly) on success.
+* Verify protected pages read session and work.
+
+**Commit message**
+
+```
+feat(auth): implement real email+password register/login with JWT cookie; remove test login banner; add accessible error toast and rate-limit
+```
+
+---
