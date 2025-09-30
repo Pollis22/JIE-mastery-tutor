@@ -1,0 +1,177 @@
+Here's a comprehensive prompt for Agent 3 to fix the backend login issue:
+
+---
+
+**PROMPT FOR AGENT 3:**
+
+```
+The login functionality is failing with a 500 Internal Server Error. The frontend is working correctly and sending POST requests to /api/login, but the backend is returning 500 errors instead of authenticating users.
+
+CRITICAL ISSUES TO FIX:
+
+1. Backend Login Route Error (Priority 1)
+   - The /api/login endpoint is returning 500 Internal Server Error
+   - Browser console shows: POST https://ai-voice-tutor-2-pollis.replit.app/api/login 500 (Internal Server Error)
+   - The request is being sent with correct credentials: test@example.com / TestPass123!
+   
+2. Investigation Required:
+   - Check server/routes/auth.ts (or wherever the login route is defined)
+   - Look for the actual error in the server logs
+   - Verify database connection is working
+   - Confirm the test user exists in the database
+   - Check if password hashing/comparison is working
+
+3. Testing Requirements:
+   - Add detailed console.log statements in the login route to trace execution
+   - Log each step: request received, user lookup, password comparison, token generation
+   - Test the database query independently
+   - Verify bcrypt.compare() is working correctly
+
+STEP-BY-STEP DEBUGGING PROCESS:
+
+Step 1: Add Comprehensive Logging
+Add these console logs to the login route handler:
+
+```typescript
+console.log('=== LOGIN REQUEST RECEIVED ===');
+console.log('Request body:', req.body);
+console.log('Email:', req.body.email);
+console.log('Password length:', req.body.password?.length);
+
+try {
+  console.log('Step 1: Looking up user...');
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email)
+  });
+  console.log('User found:', !!user);
+  console.log('User data:', user ? { id: user.id, email: user.email } : 'null');
+
+  if (!user) {
+    console.log('❌ User not found');
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+
+  console.log('Step 2: Comparing passwords...');
+  console.log('Stored hash length:', user.password?.length);
+  const isValid = await bcrypt.compare(password, user.password);
+  console.log('Password comparison result:', isValid);
+
+  if (!isValid) {
+    console.log('❌ Invalid password');
+    return res.status(401).json({ message: 'Invalid credentials' });
+  }
+
+  console.log('Step 3: Generating token...');
+  // token generation code
+  console.log('✅ Login successful');
+  
+} catch (error) {
+  console.error('❌ LOGIN ERROR:', error);
+  console.error('Error message:', error.message);
+  console.error('Error stack:', error.stack);
+  res.status(500).json({ message: 'Internal server error', details: error.message });
+}
+```
+
+Step 2: Verify Database Setup
+Run these commands and check the output:
+
+```bash
+# Check if database file exists
+ls -la *.db
+
+# Verify test user exists
+npm run db:studio
+# OR if using SQLite directly:
+sqlite3 local.db "SELECT id, email, username FROM users WHERE email='test@example.com';"
+
+# If user doesn't exist, create it
+npm run db:seed
+```
+
+Step 3: Test Database Connection
+Add a test endpoint to verify the database is working:
+
+```typescript
+app.get('/api/test-db', async (req, res) => {
+  try {
+    const userCount = await db.select().from(users);
+    res.json({ 
+      success: true, 
+      userCount: userCount.length,
+      users: userCount.map(u => ({ id: u.id, email: u.email }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+```
+
+Visit https://ai-voice-tutor-2-pollis.replit.app/api/test-db to verify.
+
+Step 4: Test Password Hashing
+Create a test script to verify bcrypt is working:
+
+```typescript
+import bcrypt from 'bcrypt';
+
+async function testPassword() {
+  const plainPassword = 'TestPass123!';
+  const hash = await bcrypt.hash(plainPassword, 10);
+  console.log('Generated hash:', hash);
+  
+  const isValid = await bcrypt.compare(plainPassword, hash);
+  console.log('Comparison result:', isValid);
+}
+
+testPassword();
+```
+
+Step 5: Check Environment Variables
+Verify these are set in Replit Secrets:
+- DATABASE_URL (if using PostgreSQL)
+- JWT_SECRET
+- Any other required config
+
+Step 6: Full End-to-End Test
+After implementing fixes:
+
+1. Restart the server completely
+2. Clear browser cache and hard refresh (Ctrl+Shift+R)
+3. Open browser DevTools → Network tab
+4. Try logging in with: test@example.com / TestPass123!
+5. Check:
+   - Network tab: Should show 200 response with user data
+   - Console tab: Should show no errors
+   - Server logs: Should show "✅ Login successful"
+6. Verify the user is redirected to the dashboard
+7. Test with wrong password - should show 401 error
+8. Test with non-existent email - should show 401 error
+
+DELIVERABLES:
+
+1. Identify the exact error causing the 500 response
+2. Fix the backend login route
+3. Ensure the test user exists and passwords match
+4. Verify database connection is working
+5. Test successful login returns 200 with user data and JWT token
+6. Test failed login returns 401 with error message
+7. Confirm error toast appears in browser for failed login
+8. Remove debug logging after verification (or keep minimal logging)
+9. Take screenshots showing:
+   - Successful login (200 response in Network tab)
+   - Failed login (401 response with error message)
+   - Server logs showing the complete login flow
+
+IMPORTANT: Do NOT say "it's fixed" until you have actually tested the login in the browser and verified:
+- Network tab shows 200 response
+- User is logged in and redirected
+- Token is stored correctly
+- You can access protected routes
+
+The previous attempt claimed it was fixed but it clearly wasn't. Please test thoroughly before confirming.
+```
+
+---
+
+This prompt is specific, actionable, and includes concrete testing steps to ensure Agent 3 actually fixes and verifies the issue rather than just assuming it's working.
