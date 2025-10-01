@@ -1,0 +1,56 @@
+The error message shows:
+
+**"An error occurred - Failed to load the raw-audio-processor worklet module. Make sure the browser supports AudioWorklets."**
+
+This is an **AudioWorklet** compatibility issue with ElevenLabs' voice agent. Here's what's happening and how to fix it:
+
+## The Problem:
+
+ElevenLabs voice agents use the Web Audio API's AudioWorklet feature, which requires:
+1. **HTTPS** (secure context)
+2. **Proper CORS headers** for loading the worklet module
+3. **SharedArrayBuffer support** (which requires specific headers)
+
+Your dev preview URL (`.replit.dev`) should support HTTPS, but the AudioWorklet module isn't loading, likely due to missing security headers.
+
+## The Fix:
+
+**Send this to Agent 3:**
+
+```
+The ElevenLabs voice agent fails with "Failed to load raw-audio-processor worklet module" error.
+
+This requires specific HTTP headers for AudioWorklet and SharedArrayBuffer support.
+
+Add these headers to server/index.ts, right after the existing middleware (around line 20):
+
+```typescript
+// Required headers for ElevenLabs AudioWorklet
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  next();
+});
+```
+
+These headers enable SharedArrayBuffer which is required for AudioWorklets.
+
+IMPORTANT: Add this BEFORE the routes are registered, right after the other app.use() middleware.
+
+Restart the dev server and test the voice agent again.
+```
+
+## Additional Check:
+
+If that doesn't work, verify in **ElevenLabs Dashboard → Agent Settings → Allowed Origins** that you've added:
+- `https://[your-hash].replit.dev` (your exact dev URL)
+- `https://ai-voice-tutor-2-pollis.replit.app` (your production URL)
+
+The allowed origins must match EXACTLY - no trailing slashes, correct protocol (https).
+
+## If Still Broken:
+
+AudioWorklets might not work in Replit's iframe preview. Try opening the dev URL in a **new browser tab** (not the Replit embedded preview) to test if it's an iframe limitation.
+
+This is a common issue with WebRTC/Audio APIs in embedded contexts.
