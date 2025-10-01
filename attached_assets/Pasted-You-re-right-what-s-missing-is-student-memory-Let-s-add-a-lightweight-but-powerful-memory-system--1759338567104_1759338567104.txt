@@ -1,0 +1,177 @@
+You’re right—what’s missing is “student memory.”
+Let’s add a lightweight but powerful memory system that (a) feels real to families, (b) improves tutoring quality every session, and (c) is safe & exportable.
+
+Below is a tight plan + an Agent 3–ready prompt you can paste to build it.
+
+⸻
+
+What we’ll add
+
+Three kinds of memory
+	1.	Profile Memory (persistent facts)
+	•	Name, pronouns, grade band, subject preferences
+	•	Learning style (voice pace, encouragement level), accessibility flags
+	•	Goal(s) (e.g., “master long division”, “vocab for Friday”)
+	2.	Materials Memory (retained docs)
+	•	Already half-there with uploads; we’ll “pin” docs to a student so they’re auto-available across sessions.
+	3.	Conversation Memory (summaries)
+	•	Short per-session note: what was taught, misconceptions, next steps
+	•	A running “progress log” the tutor can use to personalize the next session
+
+Where it shows up in the UI
+	•	Student Switcher (top right): dropdown to select / add student
+	•	Student Profile Panel (right drawer or modal):
+	•	Basics: name, grade, pace (slow/normal/fast), encouragement (low/med/high)
+	•	Goals (chips), “Pinned materials” list
+	•	Minutes remaining (if you metered usage)
+	•	Session Summary Card (auto after Stop Session)
+	•	“What we did”, “What to practice”, “Next time”
+	•	Save to history toggle (on by default)
+
+How it improves the voice tutor
+	•	On Start Learning, we compose a context bundle from:
+	•	Profile memory (basics, style, goals)
+	•	Pinned materials (doc IDs → RAG chunks)
+	•	Last session summary (if recent)
+	•	We pass that as systemPromptOverride + firstMessageOverride to the widget.
+
+Privacy & control
+	•	Every student profile has Export / Delete memory
+	•	Parents can toggle “Remember this session”
+
+⸻
+
+Agent 3 prompt (paste this)
+
+Implement Student Memory MVP
+
+1) Data model (Prisma or SQL)
+
+Add tables:
+
+// student profile
+model Student {
+  id            String   @id @default(cuid())
+  ownerUserId   String   // parent account
+  name          String
+  gradeBand     String   // e.g. "K-2", "3-5", ...
+  pace          String   // "slow" | "normal" | "fast"
+  encouragement String   // "low" | "medium" | "high"
+  goals         String[] // text tags
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  pinnedDocs    StudentDocPin[]
+  sessions      TutorSession[]
+}
+
+// pin uploaded docs to a student
+model StudentDocPin {
+  id         String   @id @default(cuid())
+  studentId  String
+  docId      String
+  pinnedAt   DateTime @default(now())
+  Student    Student  @relation(fields: [studentId], references: [id])
+}
+
+// store summaries and minute usage per session
+model TutorSession {
+  id            String   @id @default(cuid())
+  studentId     String
+  userId        String   // parent account
+  startedAt     DateTime @default(now())
+  endedAt       DateTime?
+  minutesUsed   Int      @default(0)
+  summary       String?  // short summary
+  misconceptions String? // short notes
+  nextSteps     String?  // action items
+  Student       Student  @relation(fields: [studentId], references: [id])
+}
+
+If we’re not using Prisma, create equivalent SQL tables.
+
+2) API routes
+
+Add these (auth required; use existing auth middleware):
+
+GET  /api/students                          -> list for owner
+POST /api/students                          -> create (name, gradeBand, pace, encouragement, goals[])
+PUT  /api/students/:studentId               -> update profile
+DELETE /api/students/:studentId             -> delete (and cascade pins, sessions)
+
+POST /api/students/:studentId/pins          -> { docId }
+DELETE /api/students/:studentId/pins/:pinId -> unpin
+
+GET  /api/students/:studentId/sessions      -> list summaries (limit, cursor)
+POST /api/students/:studentId/sessions      -> start { sessionId? }, returns sessionId
+PUT  /api/sessions/:sessionId               -> update { endedAt, minutesUsed, summary, misconceptions, nextSteps }
+
+POST /api/students/:studentId/export        -> streams JSON (profile + pins + sessions)
+DELETE /api/students/:studentId/memory      -> wipes summaries only (keep profile)
+
+3) Context builder on Start
+
+In the Start Learning handler (client side), call:
+
+POST /api/context/session-start
+body: {
+  studentId,
+  includePinnedDocs: true,
+  sessionId
+}
+
+Server builds:
+	•	Profile snippet:
+	•	“Student: {name}, grade band {gradeBand}, prefers {pace} pace and {encouragement} encouragement.”
+	•	“Goals: …”
+	•	Last session’s summary / misconceptions / nextSteps (if within 30 days)
+	•	Pin doc IDs → pull top chunks (RAG) and add as “Materials context”
+
+Return { systemPrompt, firstMessage }.
+Use them in <ConvaiHost systemPromptOverride / firstMessageOverride>.
+
+4) UI
+	•	Add Student Switcher (top-right, beside “Start Learning”):
+	•	Shows current student; “+ Add student” opens modal
+	•	Add Student Profile Panel (drawer):
+	•	Name, grade, pace (radio buttons), encouragement (radio), goals (chips with add/remove)
+	•	Pinned materials list with remove icon
+	•	Buttons: Export Memory, Delete Memory
+	•	When Stop Session:
+	•	Show Session Summary modal with 3 fields (auto-filled by our summarizer if available): “What we did”, “Misconceptions”, “Next steps”
+	•	Checkbox “Save to memory” (default ON) → PUT /api/sessions/:id
+
+5) Summarization hook (optional, behind env flag)
+
+After each N turns or on Stop:
+	•	If ENABLE_AUTO_SUMMARY=true, call OpenAI to produce ~80–120 token summary, misconceptions, next steps.
+	•	Save via PUT /api/sessions/:id. If quota exceeded, fall back to manual entry UI (still works).
+
+6) Minutes meter (optional)
+	•	Track minutes per session and add to minutesUsed.
+	•	Show “Minutes remaining” for the student if plan enforces limits.
+
+7) Privacy & safety
+	•	Routes scoped to owner userId.
+	•	Export returns JSON blob { student, pinnedDocs, sessions }.
+	•	Delete Memory clears sessions only (keep profile) or full delete if chosen.
+	•	Add consent text: “Saving summaries improves future lessons. You can delete anytime.”
+
+8) Tests
+	•	Unit tests for context builder (profile + last summary + pinned docs)
+	•	API tests for student CRUD, pin CRUD, session save
+	•	Basic UI e2e: create student → pin doc → start session → save summary → reload context reflects memory
+
+Ship in small PRs: (1) models+routes, (2) context builder, (3) UI, (4) summaries, (5) export/delete.
+
+⸻
+
+How this changes your start flow
+	•	Parent selects / creates a Student.
+	•	Uploads & pins docs to that student (or checks “Keep for future sessions” on upload—already in your panel).
+	•	Press Start Learning → the tutor greets the student with their name, pace, goals, and references pinned materials.
+	•	After Stop Session → quick summary saved to memory. Next time, the tutor builds on it.
+
+⸻
+
+If you want, I can also give you the exact Prisma migrations + example Express route handlers next. Or we can start with just the UI + mock routes to see the flow and wire the backend right after.
