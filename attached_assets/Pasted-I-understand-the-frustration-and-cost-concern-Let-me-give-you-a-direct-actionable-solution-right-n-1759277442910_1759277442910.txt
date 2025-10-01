@@ -1,0 +1,153 @@
+I understand the frustration and cost concern. Let me give you a direct, actionable solution right now.
+
+## Immediate Action Plan - Copy/Paste This to Agent 3:
+
+```
+EMERGENCY FIX REQUIRED - BILLING ISSUE
+
+The server is returning 500 errors on /api/login. Stop all debugging and follow these steps EXACTLY:
+
+1. Open server logs RIGHT NOW and copy the EXACT error stack trace that appears when login is attempted. Look for lines starting with "Error:" or "TypeError:" or "ReferenceError:". Paste the FULL error here.
+
+2. While you find that, implement this SAFE login endpoint that cannot crash:
+
+FILE: server/routes/auth.ts (or wherever /api/login is defined)
+
+```typescript
+app.post('/api/login', async (req, res) => {
+  try {
+    // Log everything to diagnose
+    console.log('=== LOGIN ATTEMPT ===');
+    console.log('Body received:', req.body);
+    
+    // Validate input
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password required' });
+    }
+
+    // Import at top if not already
+    const bcrypt = require('bcrypt');
+    
+    // Query database with error handling
+    let user;
+    try {
+      user = await db.query.users.findFirst({
+        where: eq(users.email, email)
+      });
+    } catch (dbError) {
+      console.error('Database error:', dbError);
+      return res.status(500).json({ message: 'Database error', error: dbError.message });
+    }
+
+    if (!user) {
+      console.log('User not found');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // Check password exists
+    if (!user.password) {
+      console.error('User has no password hash');
+      return res.status(500).json({ message: 'Account configuration error' });
+    }
+
+    // Compare password with error handling
+    let isValid;
+    try {
+      isValid = await bcrypt.compare(password, user.password);
+    } catch (bcryptError) {
+      console.error('Bcrypt error:', bcryptError);
+      return res.status(500).json({ message: 'Password verification error', error: bcryptError.message });
+    }
+
+    if (!isValid) {
+      console.log('Invalid password');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // Session handling with error handling
+    if (!req.session) {
+      console.error('Session not available');
+      return res.status(500).json({ message: 'Session configuration error' });
+    }
+
+    req.session.userId = user.id;
+    
+    // Send response
+    const { password: _, ...userWithoutPassword } = user;
+    return res.status(200).json({ user: userWithoutPassword });
+
+  } catch (error) {
+    console.error('UNHANDLED ERROR:', error);
+    console.error('Stack:', error.stack);
+    return res.status(500).json({ 
+      message: 'Server error', 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+```
+
+3. Restart the server: kill the process and run `npm run dev` again
+
+4. Test in browser immediately. If it still fails, the error response will now include details.
+
+5. Report back with:
+   - The response from step 4
+   - The original error from step 1
+   
+Time limit: 5 minutes. Do not do anything else.
+```
+
+---
+
+## If Agent 3 Still Fails, Do This Yourself:
+
+1. **In Replit Shell, run:**
+```bash
+grep -r "app.post.*login" server/
+```
+This finds the login endpoint file.
+
+2. **Open that file and replace the login handler with the code above**
+
+3. **Check these files exist and are configured:**
+
+```bash
+# Verify express middleware in server/index.ts or server/app.ts
+cat server/index.ts | grep -A 5 "express.json"
+```
+
+Should see:
+```typescript
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+```
+
+4. **Restart server:**
+```bash
+# Press Ctrl+C in the console running the server
+npm run dev
+```
+
+5. **Test immediately**
+
+---
+
+## Nuclear Option - Bypass the Agent:
+
+If you give me access to your Replit or share the relevant server code files, I can identify the exact bug in 2 minutes. The issue is almost certainly one of:
+
+- Missing `await` keyword
+- `req.body` is undefined (middleware issue)
+- Database not connected
+- Bcrypt import error
+- User password field is null
+
+**Can you share:**
+1. The file that contains `app.post('/api/login'...)`
+2. The file that sets up Express (usually `server/index.ts` or `server/app.ts`)
+3. The actual error from Replit console (not browser console)
+
+Or just give me read access to the Replit and I'll find it in 60 seconds.
