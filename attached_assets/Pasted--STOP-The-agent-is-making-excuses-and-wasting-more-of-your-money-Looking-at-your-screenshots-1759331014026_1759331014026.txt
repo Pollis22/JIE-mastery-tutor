@@ -1,0 +1,98 @@
+**STOP. The agent is making excuses and wasting more of your money.**
+
+Looking at your screenshots, I can see the REAL error now:
+
+**Image 1 Console shows:**
+```
+[AUTH] Login error! Error: Authentication error
+at async Object.mutationFn (index-CXZVlaMc.js:168:57042)
+```
+
+**And:**
+```
+API Error 500: Authentication error
+```
+
+This is NOT a deployment issue. The error is happening in the **authentication logic itself**. The agent is deflecting by talking about deployments.
+
+## Here's What's Actually Wrong:
+
+The Passport LocalStrategy is failing because of the field name issue I mentioned earlier, but there's also **another bug in the test mode logic**.
+
+Looking back at the auth.ts code you shared, line 78 has a brace placement error that causes the normal authentication to never run.
+
+## Direct Fix - Do This Now:
+
+**Tell the agent:**
+
+```
+Stop talking about deployments. The error shows "Authentication error" which means the Passport strategy is failing.
+
+In server/auth.ts, the LocalStrategy has TWO bugs:
+
+1. Line 66: usernameField should be 'email' not 'username'
+2. Lines 78-112: The closing braces are wrong - normal auth code is inside the test mode check
+
+Replace lines 64-113 with this EXACT code:
+
+```typescript
+passport.use(
+  new LocalStrategy(
+    { usernameField: 'email', passwordField: 'password' },
+    async (email, password, done) => {
+      try {
+        // Test mode
+        const isTestMode = process.env.AUTH_TEST_MODE === 'true' || process.env.NODE_ENV === 'development';
+        const testEmail = process.env.TEST_USER_EMAIL || 'test@example.com';
+        const testPassword = process.env.TEST_USER_PASSWORD || 'TestPass123!';
+        
+        if (isTestMode && email.toLowerCase() === testEmail.toLowerCase() && password === testPassword) {
+          const testUser = {
+            id: 'test-user-id',
+            username: testEmail,
+            email: testEmail,
+            password: await hashPassword(testPassword),
+            firstName: 'Test',
+            lastName: 'User',
+            subscriptionPlan: 'all' as const,
+            subscriptionStatus: 'active' as const,
+            stripeCustomerId: null,
+            stripeSubscriptionId: null,
+            weeklyVoiceMinutesUsed: 0,
+            weeklyResetDate: new Date(),
+            preferredLanguage: 'english',
+            voiceStyle: 'cheerful',
+            speechSpeed: '1.0',
+            volumeLevel: 75,
+            isAdmin: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          return done(null, testUser);
+        }
+        
+        // Normal auth (OUTSIDE test mode check)
+        const user = await storage.getUserByUsername(email);
+        if (!user || !(await comparePasswords(password, user.password))) {
+          return done(null, false);
+        }
+        return done(null, user);
+        
+      } catch (error) {
+        console.error('LocalStrategy error:', error);
+        return done(error);
+      }
+    }
+  )
+);
+```
+
+Save, restart the dev server, and test immediately. NO deployment needed - test in development first.
+```
+
+This is the actual fix. The agent has been running in circles for over an hour. This code will work because it:
+1. Uses 'email' field name (matches your form)
+2. Properly structures the test mode vs normal mode logic
+3. Has proper error handling
+
+Make this change and test. If the agent still deflects, you may want to consider making the edit yourself directly in the Replit editor.
