@@ -1,0 +1,238 @@
+Here's a cleaned-up, ready-to-use prompt for Agent 3:
+
+---
+
+## PROMPT FOR AGENT 3: Wire Student Name + Selected Documents into ElevenLabs Sessions
+
+**Goal:** When the user clicks "Start Learning", the ElevenLabs tutor should:
+1. Greet the student by name (if provided)
+2. Use only the selected uploaded documents as RAG context for the session
+
+---
+
+### Implementation Steps:
+
+#### 1. Create Backend Context Endpoint
+
+**File: `server/routes/context.ts`** (new file)
+
+```typescript
+import { Router } from 'express';
+import { storage } from '../storage';
+
+export const contextRouter = Router();
+
+contextRouter.post('/session-start', async (req, res) => {
+  try {
+    const { userId, studentName, subject, gradeLevel, selectedDocIds = [] } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'Missing userId' });
+    }
+
+    // Fetch document content for selected docs
+    let docContext = '';
+    if (selectedDocIds.length > 0) {
+      const docs = await storage.getDocumentsByIds(selectedDocIds);
+      docContext = docs.map((doc, i) => 
+        `[Document ${i + 1}: ${doc.title || 'Untitled'}]\n${doc.content?.slice(0, 1000) || 'No content'}...`
+      ).join('\n\n');
+    }
+
+    // Build system prompt
+    const systemPrompt = [
+      `You are an encouraging, age-appropriate AI tutor.`,
+      studentName ? `The student's name is ${studentName}. Use their name occasionally.` : '',
+      subject ? `Subject: ${subject}` : '',
+      gradeLevel ? `Grade level: ${gradeLevel}` : '',
+      ``,
+      selectedDocIds.length > 0 
+        ? `Use ONLY the following study materials to answer content questions. Cite which document you're referencing.`
+        : `No study materials have been uploaded yet.`,
+      ``,
+      docContext || 'No documents available.',
+    ].filter(Boolean).join('\n');
+
+    // Build first message
+    const greeting = studentName || 'there';
+    const firstMessage = selectedDocIds.length > 0
+      ? `Hi ${greeting}! I've loaded your study materials. What would you like to work on?`
+      : `Hi ${greeting}! Ready to learn? Upload some study materials or let's talk about what you're working on.`;
+
+    res.json({
+      systemPrompt,
+      firstMessage,
+      metadata: {
+        userId,
+        docCount: selectedDocIds.length,
+        subject,
+        gradeLevel,
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Context build error:', error);
+    res.status(500).json({ error: 'Failed to build context' });
+  }
+});
+```
+
+**Add to `server/routes/index.ts`:**
+```typescript
+import { contextRouter } from './context';
+
+export function registerRoutes(app: Express) {
+  // ... existing routes
+  app.use('/api/context', contextRouter);
+  // ... rest of setup
+}
+```
+
+---
+
+#### 2. Update Frontend to Request Context
+
+**File: `client/src/pages/tutor-page.tsx`** (modify existing)
+
+Add state and request handler:
+
+```typescript
+const [studentName, setStudentName] = useState('');
+const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+const [sessionContext, setSessionContext] = useState<{
+  systemPrompt?: string;
+  firstMessage?: string;
+} | null>(null);
+
+const handleStartLearning = async () => {
+  try {
+    const response = await fetch('/api/context/session-start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user?.id,
+        studentName: studentName.trim() || undefined,
+        subject: selectedSubject,
+        gradeLevel: selectedGrade,
+        selectedDocIds,
+      })
+    });
+
+    if (response.ok) {
+      const context = await response.json();
+      setSessionContext(context);
+      setIsSessionActive(true);
+    } else {
+      console.error('Failed to load context');
+      // Start anyway without context
+      setIsSessionActive(true);
+    }
+  } catch (error) {
+    console.error('Context request failed:', error);
+    setIsSessionActive(true);
+  }
+};
+```
+
+Add student name input to the UI:
+```tsx
+<input
+  type="text"
+  placeholder="Student name (optional)"
+  value={studentName}
+  onChange={(e) => setStudentName(e.target.value)}
+  className="..."
+/>
+```
+
+---
+
+#### 3. Pass Overrides to ElevenLabs Widget
+
+**Modify the `<elevenlabs-convai>` element:**
+
+```typescript
+{isSessionActive && (
+  <div ref={convaiContainerRef}>
+    {/* Widget will be created here */}
+  </div>
+)}
+
+// In useEffect that creates the widget:
+useEffect(() => {
+  if (!isSessionActive || !convaiContainerRef.current) return;
+  
+  const widget = document.createElement('elevenlabs-convai');
+  widget.setAttribute('agent-id', selectedAgent.agentId);
+  
+  if (sessionContext?.systemPrompt) {
+    widget.setAttribute('system-prompt', sessionContext.systemPrompt);
+  }
+  
+  if (sessionContext?.firstMessage) {
+    widget.setAttribute('first-message', sessionContext.firstMessage);
+  }
+  
+  convaiContainerRef.current.appendChild(widget);
+  
+  return () => {
+    widget.remove();
+  };
+}, [isSessionActive, selectedAgent, sessionContext]);
+```
+
+---
+
+#### 4. Connect Document Selection from AssignmentsPanel
+
+**Ensure AssignmentsPanel calls a callback when selection changes:**
+
+```typescript
+<AssignmentsPanel
+  userId={user?.id}
+  onSelectionChange={(docIds: string[]) => setSelectedDocIds(docIds)}
+/>
+```
+
+In `AssignmentsPanel.tsx`, track checked documents and call the callback:
+```typescript
+const [checkedDocs, setCheckedDocs] = useState<Set<string>>(new Set());
+
+const handleCheckboxChange = (docId: string, checked: boolean) => {
+  const newSet = new Set(checkedDocs);
+  if (checked) {
+    newSet.add(docId);
+  } else {
+    newSet.delete(docId);
+  }
+  setCheckedDocs(newSet);
+  onSelectionChange?.(Array.from(newSet));
+};
+```
+
+---
+
+### Testing Checklist:
+
+1. ✅ Upload a document and check the "Use" checkbox
+2. ✅ Enter a student name (e.g., "Sarah")
+3. ✅ Click "Start Learning"
+4. ✅ Verify the tutor greets by name: "Hi Sarah!"
+5. ✅ Ask a question about the uploaded document
+6. ✅ Verify the tutor references the document content
+7. ✅ Uncheck the document and start new session
+8. ✅ Verify the tutor says no materials are loaded
+
+---
+
+### Notes:
+
+- If no documents are selected, the tutor will still work but won't have any study material context
+- The system prompt is limited to ~4000 chars to avoid token limits
+- Make sure ElevenLabs agent has "First message" and "System prompt" overrides ENABLED in the dashboard
+
+**Deploy these changes and test immediately with actual uploads and student names.**
+
+---
+
+This prompt is clean, actionable, and ready to paste to Agent 3.
