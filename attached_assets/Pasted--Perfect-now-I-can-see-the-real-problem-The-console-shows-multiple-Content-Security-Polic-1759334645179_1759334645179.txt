@@ -1,0 +1,60 @@
+**Perfect - now I can see the real problem!**
+
+The console shows multiple **Content Security Policy (CSP)** violations. The errors say:
+
+```
+Refused to load the script because it violates the following Content Security Policy directive: "script-src 'self' 'unsafe-eval' 'unsafe-inline'"
+```
+
+And specifically:
+```
+Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep
+```
+
+## The Root Cause:
+
+Your app has a **Content Security Policy** that's blocking external scripts from ElevenLabs' CDN. The security headers we added earlier (or that exist in your config) are too restrictive.
+
+## The Fix:
+
+**Send this to Agent 3:**
+
+```
+The console shows CSP (Content Security Policy) errors blocking ElevenLabs scripts and the COEP (Cross-Origin-Embedder-Policy) is blocking resources.
+
+In server/index.ts, find where you added these headers:
+- Cross-Origin-Opener-Policy
+- Cross-Origin-Embedder-Policy  
+- Cross-Origin-Resource-Policy
+
+REMOVE those three headers completely. They're breaking ElevenLabs.
+
+Then ADD a proper CSP that allows ElevenLabs:
+
+```typescript
+app.use((req, res, next) => {
+  // Only set CSP for HTML responses, not API
+  if (!req.path.startsWith('/api')) {
+    res.setHeader('Content-Security-Policy', 
+      "default-src 'self'; " +
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://api.elevenlabs.io https://ws.api.elevenlabs.io https://js.stripe.com https://www.googletagmanager.com https://www.google-analytics.com; " +
+      "connect-src 'self' https://api.elevenlabs.io https://ws.api.elevenlabs.io wss://api.elevenlabs.io; " +
+      "worker-src 'self' blob:; " +
+      "media-src 'self' blob: https:; " +
+      "style-src 'self' 'unsafe-inline';"
+    );
+  }
+  next();
+});
+```
+
+Remove the COEP/COOP/CORP headers and use only the CSP above. Restart and test.
+```
+
+## Why This Happens:
+
+The strict `Cross-Origin-Embedder-Policy: require-corp` header you (or the agent) added blocks all cross-origin resources unless they explicitly opt-in. ElevenLabs' CDN files don't have those headers, so they get blocked.
+
+The solution is to use a more permissive CSP that explicitly allows ElevenLabs domains while removing the COEP headers that are too restrictive for third-party integrations.
+
+Once those headers are fixed and the server restarts, the ElevenLabs voice agent should load properly.
