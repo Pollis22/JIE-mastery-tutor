@@ -1,0 +1,124 @@
+**FOUND THE BUG!**
+
+Looking at the `setupAuth` function, I can see the issue. The problem is in the `/api/login` endpoint at line 176:
+
+```typescript
+app.post("/api/login", (req, res, next) => {
+  passport.authenticate("local", (err: any, user: any, info: any) => {
+```
+
+The issue is that **passport expects `username` and `password` fields**, but your frontend is likely sending `email` and `password`.
+
+Look at line 66:
+```typescript
+new LocalStrategy(
+  { usernameField: 'username', passwordField: 'password' },
+```
+
+Passport is configured to look for `username`, but your login form probably sends `email`.
+
+## The Fix:
+
+**Option 1: Change the Passport Strategy (Recommended)**
+
+In `server/auth.ts`, line 66, change:
+```typescript
+new LocalStrategy(
+  { usernameField: 'email', passwordField: 'password' },  // Changed 'username' to 'email'
+  async (username, password, done) => {  // parameter name doesn't matter
+```
+
+**Option 2: Change Frontend to Send Username**
+
+Or change your frontend to send `username` instead of `email` in the request body.
+
+---
+
+## Additional Issue - Test Mode Logic Error:
+
+There's also a syntax error on line 78. The closing brace is misplaced. It should be:
+
+```typescript
+if (isTestMode) {
+  if ((username ?? '').toLowerCase() === testEmail.toLowerCase() && password === testPassword) {
+    const testUser = {
+      // ... user object
+    };
+    return done(null, testUser);
+  }
+  // If test credentials don't match, fail authentication
+  return done(null, false);
+}
+
+// Normal authentication flow (THIS SHOULD BE OUTSIDE THE isTestMode CHECK)
+try {
+  const user = await storage.getUserByUsername(username);
+  if (!user || !(await comparePasswords(password, user.password))) {
+    return done(null, false);
+  } else {
+    return done(null, user);
+  }
+} catch (error) {
+  return done(error);
+}
+```
+
+Currently, the normal authentication is nested inside the test mode check, so it never runs.
+
+---
+
+## Complete Fixed Version:
+
+Replace the LocalStrategy section (lines 64-113) with:
+
+```typescript
+passport.use(
+  new LocalStrategy(
+    { usernameField: 'email', passwordField: 'password' },  // CHANGED HERE
+    async (email, password, done) => {  // renamed param for clarity
+      // Test mode authentication
+      const isTestMode = process.env.AUTH_TEST_MODE === 'true' || process.env.NODE_ENV === 'development';
+      const testEmail = process.env.TEST_USER_EMAIL || 'test@example.com';
+      const testPassword = process.env.TEST_USER_PASSWORD || 'TestPass123!';
+      
+      if (isTestMode && email.toLowerCase() === testEmail.toLowerCase() && password === testPassword) {
+        const testUser = {
+          id: 'test-user-id',
+          username: testEmail,
+          email: testEmail,
+          password: await hashPassword(testPassword),
+          firstName: 'Test',
+          lastName: 'User',
+          subscriptionPlan: 'all' as const,
+          subscriptionStatus: 'active' as const,
+          stripeCustomerId: null,
+          stripeSubscriptionId: null,
+          weeklyVoiceMinutesUsed: 0,
+          weeklyResetDate: new Date(),
+          preferredLanguage: 'english',
+          voiceStyle: 'cheerful',
+          speechSpeed: '1.0',
+          volumeLevel: 75,
+          isAdmin: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        return done(null, testUser);
+      }
+      
+      // Normal authentication flow
+      try {
+        const user = await storage.getUserByUsername(email);
+        if (!user || !(await comparePasswords(password, user.password))) {
+          return done(null, false);
+        }
+        return done(null, user);
+      } catch (error) {
+        return done(error);
+      }
+    }
+  )
+);
+```
+
+**Make this change, restart the server, and test immediately.** This will fix the 500 error.
