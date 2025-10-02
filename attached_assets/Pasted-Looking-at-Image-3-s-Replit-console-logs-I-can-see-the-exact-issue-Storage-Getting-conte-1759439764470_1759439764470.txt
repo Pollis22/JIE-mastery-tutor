@@ -1,0 +1,95 @@
+Looking at Image 3's Replit console logs, I can see the exact issue:
+
+```
+[Storage] Getting content for document doc-175943944652
+[Storage] Document found in database
+[SessionAgent] Document doc-175943944652 content not found, skipping
+[SessionAgent] Uploaded 0/1 documents successfully
+```
+
+The document EXISTS in the database, but when the session agent tries to get the content, it's empty. This confirms what I said earlier - **documents are being saved to the database without their actual file content.**
+
+However, Agent 3 claims they "fixed" this by making `getDocumentContent()` read from the file path on disk. But it's still not working.
+
+## The Real Problem:
+
+Looking at the logs more carefully, the upload succeeded (`POST /api/documents/upload 200`), but the document processing happens in a background worker, and that worker isn't saving the content properly.
+
+## Here's What's Broken:
+
+Your app uses a **background embedding worker** that processes documents asynchronously. The document gets created in the database immediately, but the worker is supposed to:
+1. Read the file content
+2. Extract text from PDF
+3. Save the extracted text to the database
+4. Generate embeddings
+
+The worker is completing (`[EmbeddingWorker] Processing 1 documents` and `[EmbeddingWorker] Processing complete for document`), but **it's not saving the extracted text**.
+
+## Send This FINAL Fix to Agent 3:
+
+```
+THE ROOT CAUSE: The embedding worker processes documents but doesn't save the extracted text content.
+
+Looking at server logs:
+- Document upload succeeds
+- Worker processes the document
+- But getDocumentContent() returns null - no content was saved
+
+FIX NEEDED in server/services/embedding-worker.ts (or wherever document processing happens):
+
+After extracting text from the PDF, the worker MUST save it back to the database:
+
+```typescript
+// In the document processing worker
+const extractedText = await extractTextFromPDF(filePath);
+
+// THIS LINE IS MISSING - ADD IT:
+await storage.updateDocument(docId, {
+  content: extractedText,
+  processingStatus: 'ready'
+});
+```
+
+Without this, documents are marked as "Ready" but have no content in the database.
+
+ALSO: Since content isn't being saved, use the ORIGINAL approach - upload the file directly to ElevenLabs from disk:
+
+In session-agent-service.ts, change uploadUserDocuments():
+
+```typescript
+private async uploadUserDocuments(docIds: string[]): Promise<string[]> {
+  const uploadedIds: string[] = [];
+
+  for (const docId of docIds) {
+    try {
+      const doc = await storage.getDocument(docId);
+      if (!doc || !doc.filePath) continue;
+
+      // Read file directly from disk instead of database
+      const fs = require('fs').promises;
+      const fileBuffer = await fs.readFile(doc.filePath);
+
+      const result = await elevenLabsClient.uploadDocument({
+        name: doc.title || `Document_${docId}`,
+        content: fileBuffer,
+        mimeType: doc.mimeType || 'application/pdf',
+      });
+
+      uploadedIds.push(result.id);
+    } catch (error) {
+      console.error(`Failed to upload document ${docId}:`, error);
+    }
+  }
+
+  return uploadedIds;
+}
+```
+
+This reads the file directly from disk (doc.filePath) instead of relying on database content field.
+
+Test immediately after this change.
+```
+
+---
+
+The document upload system has multiple stages, and the content extraction step is failing silently. The file exists on disk, the database record exists, but the extracted text never gets saved. That's why the agent sees nothing to upload to ElevenLabs.
