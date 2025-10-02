@@ -1,0 +1,500 @@
+## PROMPT FOR AGENT 3: Implement Dynamic Agent Creation for Per-User Document Context
+
+**Goal:** Create a system where each tutoring session generates a temporary ElevenLabs agent with the student's specific documents, enabling isolated, personalized knowledge bases at scale.
+
+---
+
+### ARCHITECTURE OVERVIEW:
+
+When a user clicks "Start Learning":
+1. Backend creates a new ElevenLabs agent (cloned from template)
+2. Uploads user's selected documents to that agent's knowledge base
+3. Configures agent with student name, grade, subject
+4. Returns new agent ID to frontend
+5. Frontend widget connects to this unique agent ID
+6. After session ends, agent can be cached or deleted
+
+---
+
+### STEP 1: Add ElevenLabs API Client
+
+**File: `server/services/elevenlabs-client.ts`** (new file)
+
+```typescript
+import fetch from 'node-fetch';
+
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
+
+if (!ELEVENLABS_API_KEY) {
+  console.warn('Warning: ELEVENLABS_API_KEY not set in environment');
+}
+
+export class ElevenLabsClient {
+  
+  // Create a new agent (cloned from template)
+  async createAgent(config: {
+    name: string;
+    prompt: string;
+    firstMessage: string;
+    language?: string;
+    conversationConfig?: any;
+  }) {
+    const response = await fetch(`${ELEVENLABS_API_BASE}/convai/agents/create`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY!,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: config.name,
+        prompt: {
+          prompt: config.prompt,
+        },
+        first_message: config.firstMessage,
+        language: config.language || 'en',
+        conversation_config: config.conversationConfig || {},
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to create agent: ${response.status} - ${error}`);
+    }
+
+    return await response.json();
+  }
+
+  // Upload document to knowledge base
+  async uploadDocument(file: {
+    name: string;
+    content: Buffer;
+    mimeType: string;
+  }) {
+    const formData = new FormData();
+    formData.append('name', file.name);
+    formData.append('file', new Blob([file.content], { type: file.mimeType }), file.name);
+
+    const response = await fetch(`${ELEVENLABS_API_BASE}/convai/knowledge-base`, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY!,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to upload document: ${response.status} - ${error}`);
+    }
+
+    return await response.json(); // Returns { id: "doc_xyz123" }
+  }
+
+  // Update agent to include knowledge base documents
+  async updateAgentKnowledgeBase(agentId: string, documentIds: string[]) {
+    const response = await fetch(`${ELEVENLABS_API_BASE}/convai/agents/${agentId}`, {
+      method: 'PATCH',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY!,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        knowledge_base: documentIds,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Failed to update agent knowledge base: ${response.status} - ${error}`);
+    }
+
+    return await response.json();
+  }
+
+  // Delete agent (for cleanup)
+  async deleteAgent(agentId: string) {
+    const response = await fetch(`${ELEVENLABS_API_BASE}/convai/agents/${agentId}`, {
+      method: 'DELETE',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY!,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error(`Failed to delete agent ${agentId}:`, error);
+    }
+  }
+
+  // Delete knowledge base document
+  async deleteDocument(documentId: string) {
+    const response = await fetch(`${ELEVENLABS_API_BASE}/convai/knowledge-base/${documentId}`, {
+      method: 'DELETE',
+      headers: {
+        'xi-api-key': ELEVENLABS_API_KEY!,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      console.error(`Failed to delete document ${documentId}:`, error);
+    }
+  }
+}
+
+export const elevenLabsClient = new ElevenLabsClient();
+```
+
+---
+
+### STEP 2: Create Session Agent Service
+
+**File: `server/services/session-agent-service.ts`** (new file)
+
+```typescript
+import { elevenLabsClient } from './elevenlabs-client';
+import { storage } from '../storage';
+
+// Template agent configurations (your 5 grade-level agents)
+const AGENT_TEMPLATES = {
+  'kindergarten-2': {
+    prompt: 'You are a warm, patient tutor for young children (K-2). Use simple words, encouragement, and fun examples.',
+    language: 'en',
+  },
+  'grades-3-5': {
+    prompt: 'You are an engaging elementary tutor (grades 3-5). Make learning fun with relatable examples and positive reinforcement.',
+    language: 'en',
+  },
+  'grades-6-8': {
+    prompt: 'You are a supportive middle school tutor (grades 6-8). Help students build confidence and critical thinking skills.',
+    language: 'en',
+  },
+  'grades-9-12': {
+    prompt: 'You are a knowledgeable high school tutor (grades 9-12). Prepare students for advanced academics with clear explanations.',
+    language: 'en',
+  },
+  'college-adult': {
+    prompt: 'You are an expert college/adult tutor. Provide in-depth analysis and connect concepts to real-world applications.',
+    language: 'en',
+  },
+};
+
+export class SessionAgentService {
+  
+  async createSessionAgent(params: {
+    userId: string;
+    studentName?: string;
+    gradeLevel: keyof typeof AGENT_TEMPLATES;
+    subject: string;
+    selectedDocIds: string[];
+  }) {
+    const { userId, studentName, gradeLevel, subject, selectedDocIds } = params;
+
+    // 1. Get template configuration
+    const template = AGENT_TEMPLATES[gradeLevel];
+    if (!template) {
+      throw new Error(`Invalid grade level: ${gradeLevel}`);
+    }
+
+    // 2. Build personalized system prompt
+    const systemPrompt = [
+      template.prompt,
+      studentName ? `The student's name is ${studentName}. Address them by name occasionally.` : '',
+      `Subject focus: ${subject}`,
+      selectedDocIds.length > 0 
+        ? `You have access to the student's uploaded study materials. Reference these documents when answering questions about their coursework.`
+        : 'No study materials have been uploaded yet. Help the student with general concepts.',
+    ].filter(Boolean).join('\n\n');
+
+    // 3. Build first message
+    const greeting = studentName || 'there';
+    const firstMessage = selectedDocIds.length > 0
+      ? `Hi ${greeting}! I've loaded your study materials and I'm ready to help with ${subject}. What would you like to work on?`
+      : `Hi ${greeting}! I'm here to help you with ${subject}. What topic would you like to explore?`;
+
+    // 4. Create agent in ElevenLabs
+    const agent = await elevenLabsClient.createAgent({
+      name: `Session_${userId}_${Date.now()}`,
+      prompt: systemPrompt,
+      firstMessage,
+      language: template.language,
+    });
+
+    const agentId = agent.agent_id;
+
+    // 5. Upload documents if any selected
+    if (selectedDocIds.length > 0) {
+      const documentIds = await this.uploadUserDocuments(selectedDocIds);
+      
+      // 6. Attach documents to agent's knowledge base
+      if (documentIds.length > 0) {
+        await elevenLabsClient.updateAgentKnowledgeBase(agentId, documentIds);
+      }
+    }
+
+    // 7. Store session record in database
+    await storage.createTutoringSession({
+      userId,
+      agentId,
+      gradeLevel,
+      subject,
+      documentIds: selectedDocIds,
+      createdAt: new Date(),
+    });
+
+    return {
+      agentId,
+      expiresAt: new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours
+    };
+  }
+
+  private async uploadUserDocuments(docIds: string[]): Promise<string[]> {
+    const uploadedIds: string[] = [];
+
+    for (const docId of docIds) {
+      try {
+        // Get document from storage
+        const doc = await storage.getDocument(docId);
+        if (!doc || !doc.content) continue;
+
+        // Upload to ElevenLabs
+        const result = await elevenLabsClient.uploadDocument({
+          name: doc.title || `Document_${docId}`,
+          content: Buffer.from(doc.content),
+          mimeType: doc.mimeType || 'application/pdf',
+        });
+
+        uploadedIds.push(result.id);
+      } catch (error) {
+        console.error(`Failed to upload document ${docId}:`, error);
+      }
+    }
+
+    return uploadedIds;
+  }
+
+  async cleanupExpiredAgents() {
+    // Cleanup agents older than 4 hours
+    const expiredSessions = await storage.getExpiredTutoringSessions(4);
+    
+    for (const session of expiredSessions) {
+      try {
+        await elevenLabsClient.deleteAgent(session.agentId);
+        console.log(`Cleaned up agent: ${session.agentId}`);
+      } catch (error) {
+        console.error(`Failed to cleanup agent ${session.agentId}:`, error);
+      }
+    }
+  }
+}
+
+export const sessionAgentService = new SessionAgentService();
+```
+
+---
+
+### STEP 3: Create API Endpoint
+
+**File: `server/routes/session.ts`** (new file)
+
+```typescript
+import { Router } from 'express';
+import { sessionAgentService } from '../services/session-agent-service';
+
+export const sessionRouter = Router();
+
+sessionRouter.post('/create-session', async (req, res) => {
+  try {
+    const { userId, studentName, gradeLevel, subject, selectedDocIds = [] } = req.body;
+
+    if (!userId || !gradeLevel || !subject) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: userId, gradeLevel, subject' 
+      });
+    }
+
+    const session = await sessionAgentService.createSessionAgent({
+      userId,
+      studentName,
+      gradeLevel,
+      subject,
+      selectedDocIds,
+    });
+
+    res.json({
+      agentId: session.agentId,
+      expiresAt: session.expiresAt,
+      message: 'Session agent created successfully',
+    });
+
+  } catch (error: any) {
+    console.error('Session creation error:', error);
+    res.status(500).json({ 
+      error: 'Failed to create session agent',
+      details: error.message,
+    });
+  }
+});
+
+sessionRouter.post('/end-session', async (req, res) => {
+  try {
+    const { agentId } = req.body;
+
+    if (!agentId) {
+      return res.status(400).json({ error: 'Missing agentId' });
+    }
+
+    // Mark session as ended in database (don't delete agent immediately)
+    // Agent will be cleaned up by scheduled task
+
+    res.json({ message: 'Session ended' });
+  } catch (error: any) {
+    console.error('Session end error:', error);
+    res.status(500).json({ error: 'Failed to end session' });
+  }
+});
+```
+
+**Add to `server/routes/index.ts`:**
+```typescript
+import { sessionRouter } from './session';
+
+export function registerRoutes(app: Express) {
+  // ... existing routes
+  app.use('/api/session', sessionRouter);
+  // ... rest of setup
+}
+```
+
+---
+
+### STEP 4: Update Frontend
+
+**File: `client/src/pages/tutor-page.tsx`** (modify existing)
+
+```typescript
+const [sessionAgentId, setSessionAgentId] = useState<string | null>(null);
+const [isCreatingSession, setIsCreatingSession] = useState(false);
+
+const handleStartLearning = async () => {
+  setIsCreatingSession(true);
+  
+  try {
+    const response = await fetch('/api/session/create-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: user?.id,
+        studentName: studentName.trim() || undefined,
+        gradeLevel: selectedGrade, // e.g., "grades-6-8"
+        subject: selectedSubject,   // e.g., "Math"
+        selectedDocIds: selectedDocIds,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to create session');
+    }
+
+    const data = await response.json();
+    setSessionAgentId(data.agentId);
+    setIsSessionActive(true);
+    
+  } catch (error) {
+    console.error('Session creation failed:', error);
+    toast({
+      variant: 'destructive',
+      title: 'Failed to start session',
+      description: 'Please try again',
+    });
+  } finally {
+    setIsCreatingSession(false);
+  }
+};
+
+// Update widget creation
+useEffect(() => {
+  if (!isSessionActive || !sessionAgentId || !convaiContainerRef.current) return;
+  
+  const widget = document.createElement('elevenlabs-convai');
+  widget.setAttribute('agent-id', sessionAgentId); // Use dynamic agent ID
+  
+  convaiContainerRef.current.appendChild(widget);
+  
+  return () => {
+    widget.remove();
+  };
+}, [isSessionActive, sessionAgentId]);
+
+// Update button
+<button 
+  onClick={handleStartLearning}
+  disabled={isCreatingSession}
+>
+  {isCreatingSession ? 'Creating Session...' : 'Start Learning'}
+</button>
+```
+
+---
+
+### STEP 5: Add Cleanup Job
+
+**File: `server/index.ts`** (add to existing)
+
+```typescript
+import { sessionAgentService } from './services/session-agent-service';
+
+// Run cleanup every hour
+setInterval(async () => {
+  try {
+    await sessionAgentService.cleanupExpiredAgents();
+  } catch (error) {
+    console.error('Agent cleanup failed:', error);
+  }
+}, 60 * 60 * 1000); // 1 hour
+```
+
+---
+
+### SETUP IN ELEVENLABS DASHBOARD:
+
+**You need to do this ONCE:**
+
+1. **Get API Key:**
+   - Go to ElevenLabs dashboard → Profile → API Keys
+   - Create a new API key with permissions:
+     - `conversational_ai.agents.create`
+     - `conversational_ai.agents.delete`
+     - `conversational_ai.knowledge_base.create`
+     - `conversational_ai.knowledge_base.delete`
+   - Copy the key
+
+2. **Add to Replit Secrets:**
+   - Key: `ELEVENLABS_API_KEY`
+   - Value: `[paste your API key]`
+
+3. **That's it!** You don't need to configure anything else in the ElevenLabs dashboard. The agents are created programmatically.
+
+---
+
+### TESTING:
+
+1. Upload a document and check "Use"
+2. Enter student name
+3. Click "Start Learning"
+4. Backend creates agent (~2-3 seconds)
+5. Widget connects to unique agent
+6. Ask about the uploaded document
+7. Verify tutor references it correctly
+
+---
+
+### COST & SCALING:
+
+- **Voice minutes:** Same as before (main cost)
+- **Agent creation:** Free (no per-agent charges)
+- **API calls:** Negligible cost
+- **Scaling:** Supports thousands of concurrent sessions
+
+Deploy these changes and test immediately. The dynamic agent system will provide isolated, personalized tutoring with each student's own documents.
