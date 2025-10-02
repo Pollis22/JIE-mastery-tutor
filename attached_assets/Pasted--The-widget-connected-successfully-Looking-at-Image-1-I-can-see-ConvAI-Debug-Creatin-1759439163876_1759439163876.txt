@@ -1,0 +1,61 @@
+**The widget connected successfully!** Looking at Image 1, I can see:
+
+```
+[ConvAI Debug] Creating widget element for agent: agent_4101k6kbmy1veg0b900hp1c1hfda
+[ConvAI Debug] Widget appended to DOM
+```
+
+The widget is working. However, looking at the Replit logs in Image 2, there's a critical issue:
+
+```
+[SessionAgent] Document doc-175943811l7549 content not found, skipping
+[SessionAgent] Uploaded documents successfully
+```
+
+**The document has no content.** The document exists in your database, but the `content` field is empty or null. That's why the agent doesn't recognize it - nothing was uploaded to ElevenLabs.
+
+## The Root Cause:
+
+When documents are uploaded through your UI, they're being stored in the database but **the actual file content isn't being saved** to the `content` field. So when the session agent tries to upload to ElevenLabs, there's nothing to upload.
+
+## Send This to Agent 3:
+
+```
+THE ISSUE: Documents are being saved to database but the content field is EMPTY.
+
+Server logs show:
+"Document doc-175943811l7549 content not found, skipping"
+
+This means when documents are uploaded via /api/documents/upload, the file content is not being stored in the database content field.
+
+Check the document upload endpoint and ensure it's saving the actual file buffer/content:
+
+In server/routes/documents.ts (or similar), the upload handler should:
+
+1. Read the file buffer from the multipart form
+2. Store the FULL file content in the database content field
+3. Save as Buffer or Base64 string
+
+Example fix:
+```typescript
+app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
+  const file = req.file;
+  
+  // CRITICAL: Save the file buffer
+  await storage.createDocument({
+    userId: req.body.userId,
+    title: req.body.title,
+    subject: req.body.subject,
+    content: file.buffer, // THIS MUST BE SAVED
+    mimeType: file.mimetype,
+    size: file.size,
+  });
+});
+```
+
+Also verify storage.getDocument() returns the content field properly.
+
+Without file content in the database, the ElevenLabs agent has nothing to reference.
+```
+
+The session agent system is working correctly - it's creating agents, handling the flow properly. The problem is that documents in your database don't contain the actual file data, so there's nothing to give to ElevenLabs.
