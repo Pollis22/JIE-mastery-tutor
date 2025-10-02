@@ -1,0 +1,71 @@
+Looking at the error logs in Image 2, I can see a **new error** appearing repeatedly:
+
+```
+Error: Document doc-175943751342 not found - cannot proceed with session creation
+```
+
+The agent added a feature to handle document uploads, but now it's trying to fetch a document that doesn't exist in the database. This is blocking session creation.
+
+## The Issue:
+
+When you select "Yes - I want to upload homework" but **don't actually upload any documents**, the code is still trying to fetch document IDs that don't exist, causing the session creation to fail.
+
+## Send This to Agent 3:
+
+```
+NEW ERROR: The session creation is failing because it's trying to fetch documents that don't exist.
+
+Error message: "Document doc-175943751342 not found - cannot proceed with session creation"
+
+The problem is in the logic flow:
+
+1. User selects "Yes - I want to upload" radio button
+2. User does NOT actually upload any documents  
+3. Code tries to fetch selectedDocIds (which are empty or invalid)
+4. Session creation fails
+
+FIX NEEDED:
+
+In server/services/session-agent-service.ts, in the uploadUserDocuments() method:
+
+```typescript
+private async uploadUserDocuments(docIds: string[]): Promise<string[]> {
+  const uploadedIds: string[] = [];
+
+  // ADD THIS CHECK:
+  if (!docIds || docIds.length === 0) {
+    console.log('No documents selected, skipping upload');
+    return uploadedIds;
+  }
+
+  for (const docId of docIds) {
+    try {
+      const doc = await storage.getDocument(docId);
+      
+      // ADD THIS CHECK:
+      if (!doc) {
+        console.warn(`Document ${docId} not found, skipping`);
+        continue;
+      }
+      
+      // Rest of upload logic...
+```
+
+Also update createSessionAgent to allow empty document arrays without failing:
+
+```typescript
+// Don't fail if selectedDocIds is empty
+if (selectedDocIds && selectedDocIds.length > 0) {
+  const documentIds = await this.uploadUserDocuments(selectedDocIds);
+  if (documentIds.length > 0) {
+    await elevenLabsClient.updateAgentKnowledgeBase(agentId, documentIds);
+  }
+}
+```
+
+The session should be able to be created WITHOUT documents if the user chooses "No - Connect directly without uploading".
+```
+
+---
+
+The core issue: The code assumes documents will always be uploaded, but users can select "Yes" and then not upload anything, or select "No" entirely. The session creation needs to handle both scenarios gracefully.
