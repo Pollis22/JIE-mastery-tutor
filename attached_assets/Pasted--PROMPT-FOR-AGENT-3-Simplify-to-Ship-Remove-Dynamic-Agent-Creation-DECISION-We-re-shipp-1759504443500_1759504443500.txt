@@ -1,0 +1,137 @@
+## PROMPT FOR AGENT 3: Simplify to Ship - Remove Dynamic Agent Creation
+
+**DECISION:** We're shipping with the original 5 pre-configured agents. Remove all the dynamic agent creation complexity to get a working product deployed.
+
+---
+
+### TASKS TO COMPLETE:
+
+#### 1. Revert to Original Agent System
+
+**Remove or disable these files:**
+- `server/services/elevenlabs-client.ts` (document upload to ElevenLabs)
+- `server/services/session-agent-service.ts` (dynamic agent creation)
+- `server/routes/session.ts` (session creation endpoint)
+
+**Restore original agent selection:**
+In `client/src/pages/tutor-page.tsx`, use the original 5 static agent IDs:
+
+```typescript
+const STATIC_AGENTS = {
+  'kindergarten-2': 'agent_XXXXX', // Replace with actual agent IDs from dashboard
+  'grades-3-5': 'agent_XXXXX',
+  'grades-6-8': 'agent_XXXXX', 
+  'grades-9-12': 'agent_XXXXX',
+  'college-adult': 'agent_0101k6691t1ew6bcfm3396wfhza', // Use existing agent ID
+};
+
+const handleStartLearning = () => {
+  const agentId = STATIC_AGENTS[selectedGrade];
+  setSessionAgentId(agentId);
+  setIsSessionActive(true);
+};
+```
+
+#### 2. Remove Document Upload UI Elements
+
+**In `client/src/pages/tutor-page.tsx`:**
+- Remove the radio buttons "Do you want to upload study materials?"
+- Remove the "Use" checkbox column from the document table
+- Keep the document upload panel but make it informational only
+- Add a note: "Documents are saved for your records. The tutor provides general subject help."
+
+#### 3. Simplify the Connection Flow
+
+**Update button text and flow:**
+```typescript
+<button onClick={handleStartLearning}>
+  Start Tutoring Session
+</button>
+```
+
+Remove all document selection logic - no need to pass selectedDocIds anywhere.
+
+#### 4. Fix the First Greeting
+
+**For each of the 5 agents in ElevenLabs dashboard:**
+1. Go to Agent Settings → Widget → First Message
+2. Enable "First Message"
+3. Set it to: "Hi! I'm your [grade level] [subject] tutor. What would you like to work on today?"
+
+Use dynamic variables if available:
+```
+Hi {{student_name}}! I'm your tutor. What would you like to work on today?
+```
+
+#### 5. Add Basic Transcript Display
+
+Create a simple transcript component that shows the conversation:
+
+```typescript
+// In tutor-page.tsx
+const [messages, setMessages] = useState<Array<{role: string, text: string}>>([]);
+
+useEffect(() => {
+  if (!isSessionActive) return;
+  
+  const widget = document.querySelector('elevenlabs-convai');
+  if (!widget) return;
+
+  const handleMessage = (e: any) => {
+    const msg = e.detail?.message;
+    if (!msg) return;
+    
+    if (msg.type === 'user_transcript') {
+      setMessages(prev => [...prev, {role: 'user', text: msg.text}]);
+    } else if (msg.type === 'agent_response') {
+      setMessages(prev => [...prev, {role: 'agent', text: msg.text}]);
+    }
+  };
+
+  widget.addEventListener('message', handleMessage);
+  return () => widget.removeEventListener('message', handleMessage);
+}, [isSessionActive]);
+
+// Display messages
+<div className="transcript">
+  {messages.map((msg, i) => (
+    <div key={i} className={msg.role}>
+      {msg.text}
+    </div>
+  ))}
+</div>
+```
+
+#### 6. Clean Up Database
+
+The document upload system can stay as-is for user records, but remove any session-related tables:
+- Don't create/query `agent_sessions` table
+- Documents are just stored for user reference
+
+---
+
+### TESTING CHECKLIST:
+
+- [ ] User can log in
+- [ ] User can select grade level and subject
+- [ ] "Start Tutoring Session" button works on first click
+- [ ] Widget connects to the correct static agent
+- [ ] Agent greets the user (test in multiple browsers if needed)
+- [ ] User can speak and agent responds
+- [ ] Transcript shows both user speech and agent responses
+- [ ] Document upload still works (for user records only)
+- [ ] Multiple sessions can be started/stopped
+
+---
+
+### DELIVERY:
+
+After completing these changes:
+1. Test thoroughly in dev environment
+2. Commit all changes
+3. Deploy to production
+4. Provide a brief list of what works and known limitations
+
+**Timeline:** Complete this in the next session. Focus on a clean, working product rather than perfect features.
+
+The goal is to ship a functional voice tutoring system that users can start using today, even without the document RAG feature.
