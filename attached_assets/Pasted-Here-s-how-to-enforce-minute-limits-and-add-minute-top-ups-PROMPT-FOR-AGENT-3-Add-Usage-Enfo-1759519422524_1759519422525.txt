@@ -1,0 +1,304 @@
+Here's how to enforce minute limits and add minute top-ups:
+
+## PROMPT FOR AGENT 3: Add Usage Enforcement + Minute Top-ups
+
+---
+
+### 1. Real-Time Minute Tracking During Sessions
+
+**Create middleware to check usage before starting:**
+
+```typescript
+// server/routes/session.ts
+router.post('/check-availability', async (req, res) => {
+  const { userId } = req.body;
+  
+  const subscription = await storage.getActiveSubscription(userId);
+  
+  if (!subscription) {
+    return res.status(403).json({ 
+      allowed: false, 
+      reason: 'no_subscription',
+      message: 'Please subscribe to start tutoring sessions' 
+    });
+  }
+  
+  const remainingMinutes = subscription.includedMinutes - subscription.usedMinutes;
+  
+  if (remainingMinutes <= 0) {
+    return res.status(403).json({ 
+      allowed: false, 
+      reason: 'no_minutes',
+      message: 'You\'ve used all your minutes. Purchase more to continue.',
+      remainingMinutes: 0
+    });
+  }
+  
+  res.json({ 
+    allowed: true, 
+    remainingMinutes,
+    warningThreshold: remainingMinutes < 10 
+  });
+});
+```
+
+**Frontend enforcement in tutor-page.tsx:**
+
+```typescript
+const handleStartLearning = async () => {
+  const check = await fetch('/api/session/check-availability', {
+    method: 'POST',
+    body: JSON.stringify({ userId: user.id }),
+  }).then(r => r.json());
+  
+  if (!check.allowed) {
+    if (check.reason === 'no_subscription') {
+      navigate('/pricing');
+    } else if (check.reason === 'no_minutes') {
+      setShowTopUpModal(true);
+    }
+    return;
+  }
+  
+  if (check.warningThreshold) {
+    toast({
+      title: 'Low Minutes',
+      description: `Only ${check.remainingMinutes} minutes left`
+    });
+  }
+  
+  // Start session
+  setSessionStartTime(new Date());
+  setIsSessionActive(true);
+};
+```
+
+---
+
+### 2. Track Usage Immediately After Session
+
+```typescript
+const handleStopSession = async () => {
+  if (!sessionStartTime) return;
+  
+  const endTime = new Date();
+  const durationMs = endTime.getTime() - sessionStartTime.getTime();
+  const minutesUsed = Math.ceil(durationMs / 60000);
+  
+  // Log to database immediately
+  await fetch('/api/usage/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      userId: user.id,
+      minutesUsed,
+      sessionStart: sessionStartTime,
+      sessionEnd: endTime,
+    }),
+  });
+  
+  // Update local state
+  setIsSessionActive(false);
+  setSessionStartTime(null);
+};
+
+// Also handle page close/refresh
+useEffect(() => {
+  const handleBeforeUnload = () => {
+    if (sessionStartTime) {
+      handleStopSession();
+    }
+  };
+  
+  window.addEventListener('beforeunload', handleBeforeUnload);
+  return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+}, [sessionStartTime]);
+```
+
+**Backend usage logging:**
+
+```typescript
+// server/routes/usage.ts
+router.post('/log', async (req, res) => {
+  const { userId, minutesUsed, sessionStart, sessionEnd } = req.body;
+  
+  // Log the usage
+  await storage.createUsageLog({
+    userId,
+    minutesUsed,
+    sessionStart: new Date(sessionStart),
+    sessionEnd: new Date(sessionEnd),
+  });
+  
+  // Increment subscription usage
+  await storage.incrementSubscriptionUsage(userId, minutesUsed);
+  
+  res.json({ success: true });
+});
+```
+
+---
+
+### 3. Add Minute Top-ups (60 min for $19.99)
+
+**Create Stripe product for one-time purchases:**
+
+In Stripe dashboard:
+- Create product: "60 Minute Top-up"
+- Price: $19.99 one-time
+- Get price ID: `price_xxx`
+
+**Backend checkout endpoint:**
+
+```typescript
+// server/routes/checkout.ts
+router.post('/buy-minutes', async (req, res) => {
+  const { userId, minutePackage } = req.body; // minutePackage = '60'
+  
+  const packages = {
+    '60': { price: 1999, minutes: 60, priceId: process.env.STRIPE_PRICE_TOPUP_60 }
+  };
+  
+  const pkg = packages[minutePackage];
+  
+  const session = await stripe.checkout.sessions.create({
+    customer_email: user.email,
+    mode: 'payment', // One-time payment, not subscription
+    line_items: [{ price: pkg.priceId, quantity: 1 }],
+    success_url: `${process.env.APP_URL}/dashboard?topup=success`,
+    cancel_url: `${process.env.APP_URL}/dashboard`,
+    metadata: { 
+      userId,
+      minutesToAdd: pkg.minutes,
+      type: 'minute_topup'
+    },
+  });
+  
+  res.json({ url: session.url });
+});
+```
+
+**Webhook handler for top-up purchases:**
+
+```typescript
+// In server/routes/webhooks.ts
+case 'checkout.session.completed':
+  const session = event.data.object;
+  
+  if (session.metadata.type === 'minute_topup') {
+    // Add minutes to subscription
+    await storage.addBonusMinutes(
+      session.metadata.userId,
+      parseInt(session.metadata.minutesToAdd)
+    );
+  }
+  break;
+```
+
+**Database update:**
+
+```typescript
+// Add field to subscriptions table
+{
+  bonusMinutes: number; // Minutes purchased as top-ups
+}
+
+// Update getActiveSubscription to include bonus minutes
+const availableMinutes = subscription.includedMinutes + subscription.bonusMinutes;
+const remainingMinutes = availableMinutes - subscription.usedMinutes;
+```
+
+---
+
+### 4. Top-up UI Component
+
+**Modal for purchasing more minutes:**
+
+```typescript
+// client/src/components/TopUpModal.tsx
+export function TopUpModal({ isOpen, onClose }) {
+  const handleBuyMinutes = async () => {
+    const res = await fetch('/api/checkout/buy-minutes', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        userId: user.id,
+        minutePackage: '60' 
+      }),
+    }).then(r => r.json());
+    
+    window.location.href = res.url; // Redirect to Stripe
+  };
+  
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Out of Minutes</DialogTitle>
+          <DialogDescription>
+            You've used all your included minutes. Purchase more to continue.
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="top-up-option">
+          <div>
+            <strong>60 Minutes</strong>
+            <p>$19.99 one-time purchase</p>
+          </div>
+          <Button onClick={handleBuyMinutes}>
+            Buy Now
+          </Button>
+        </div>
+        
+        <DialogFooter>
+          <p className="text-sm">
+            Or <Link to="/pricing">upgrade your plan</Link> for more included minutes
+          </p>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+---
+
+### 5. Display Usage in Dashboard
+
+```typescript
+// client/src/pages/dashboard.tsx
+const { subscription } = await fetch('/api/subscription/current').then(r => r.json());
+
+const totalMinutes = subscription.includedMinutes + subscription.bonusMinutes;
+const usedMinutes = subscription.usedMinutes;
+const remainingMinutes = totalMinutes - usedMinutes;
+const percentUsed = (usedMinutes / totalMinutes) * 100;
+
+<div className="usage-card">
+  <h3>Minutes This Month</h3>
+  <div className="progress-bar">
+    <div style={{ width: `${percentUsed}%` }} />
+  </div>
+  <p>{remainingMinutes} of {totalMinutes} minutes remaining</p>
+  
+  {remainingMinutes < 10 && (
+    <Button onClick={() => setShowTopUpModal(true)}>
+      Buy More Minutes
+    </Button>
+  )}
+</div>
+```
+
+---
+
+### TESTING CHECKLIST:
+
+- [ ] User with 0 minutes cannot start session
+- [ ] Low minute warning shows when < 10 minutes left
+- [ ] Session automatically logs minutes after ending
+- [ ] Top-up checkout works for $19.99/60min
+- [ ] Bonus minutes add to available total
+- [ ] Dashboard shows accurate usage
+- [ ] Monthly reset doesn't affect bonus minutes
+- [ ] Page refresh during session still logs minutes
+
+This ensures users are strictly limited to their purchased minutes and can easily buy more when needed.
