@@ -1,0 +1,257 @@
+If you have Stripe integration and want to launch with billing, here's what needs to be built:
+
+## PROMPT FOR AGENT 3: Implement Stripe Billing with Subscription Plans
+
+**Goal:** Add subscription-based billing with usage tracking for voice minutes. Launch-ready payment flow.
+
+---
+
+### REQUIRED COMPONENTS:
+
+#### 1. Database Schema for Subscriptions
+
+Add these tables/fields:
+
+```typescript
+// subscriptions table
+{
+  id: string;
+  userId: string;
+  stripeCustomerId: string;
+  stripeSubscriptionId: string;
+  plan: 'starter' | 'standard' | 'pro'; // $19, $59, $99
+  includedMinutes: number; // 60, 240, 600
+  usedMinutes: number;
+  status: 'active' | 'canceled' | 'past_due';
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+}
+
+// usage_logs table
+{
+  id: string;
+  userId: string;
+  sessionId: string;
+  minutesUsed: number;
+  timestamp: Date;
+}
+```
+
+#### 2. Stripe Product/Price Setup
+
+Create products in Stripe dashboard:
+- **Starter Plan**: $19/month, 60 minutes
+- **Standard Plan**: $59/month, 240 minutes  
+- **Pro Plan**: $99/month, 600 minutes
+
+Get the price IDs and add to environment:
+```
+STRIPE_PRICE_STARTER=price_xxx
+STRIPE_PRICE_STANDARD=price_xxx
+STRIPE_PRICE_PRO=price_xxx
+```
+
+#### 3. Checkout Flow
+
+**New route: `server/routes/checkout.ts`**
+
+```typescript
+import Stripe from 'stripe';
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
+
+router.post('/create-checkout-session', async (req, res) => {
+  const { userId, plan, promoCode } = req.body;
+  
+  const priceId = {
+    starter: process.env.STRIPE_PRICE_STARTER,
+    standard: process.env.STRIPE_PRICE_STANDARD,
+    pro: process.env.STRIPE_PRICE_PRO,
+  }[plan];
+
+  const session = await stripe.checkout.sessions.create({
+    customer_email: user.email,
+    mode: 'subscription',
+    line_items: [{ price: priceId, quantity: 1 }],
+    discounts: promoCode ? [{ coupon: promoCode }] : [],
+    success_url: `${process.env.APP_URL}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${process.env.APP_URL}/pricing`,
+    metadata: { userId },
+  });
+
+  res.json({ url: session.url });
+});
+```
+
+#### 4. Webhook Handler for Stripe Events
+
+**In `server/routes/webhooks.ts`:**
+
+```typescript
+router.post('/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const event = stripe.webhooks.constructEvent(
+    req.body,
+    sig,
+    process.env.STRIPE_WEBHOOK_SECRET!
+  );
+
+  switch (event.type) {
+    case 'checkout.session.completed':
+      // Create subscription record
+      const session = event.data.object;
+      await storage.createSubscription({
+        userId: session.metadata.userId,
+        stripeCustomerId: session.customer,
+        stripeSubscriptionId: session.subscription,
+        plan: getPlanFromPriceId(session.amount_total),
+        status: 'active',
+      });
+      break;
+
+    case 'invoice.payment_succeeded':
+      // Reset monthly minutes
+      await storage.resetMonthlyMinutes(subscription.userId);
+      break;
+
+    case 'customer.subscription.deleted':
+      // Cancel subscription
+      await storage.cancelSubscription(subscription.id);
+      break;
+  }
+
+  res.json({ received: true });
+});
+```
+
+#### 5. Minute Tracking in Voice Sessions
+
+**Update `client/src/pages/tutor-page.tsx`:**
+
+```typescript
+const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
+const [minutesUsed, setMinutesUsed] = useState(0);
+
+const handleStartLearning = () => {
+  setSessionStartTime(new Date());
+  // existing connection logic
+};
+
+const handleStopSession = async () => {
+  if (!sessionStartTime) return;
+  
+  const duration = (new Date().getTime() - sessionStartTime.getTime()) / 60000;
+  
+  // Log usage
+  await fetch('/api/usage/log', {
+    method: 'POST',
+    body: JSON.stringify({
+      userId: user.id,
+      minutesUsed: Math.ceil(duration),
+      sessionId: sessionAgentId,
+    }),
+  });
+  
+  setIsSessionActive(false);
+  setSessionStartTime(null);
+};
+
+// Timer display
+useEffect(() => {
+  if (!sessionStartTime) return;
+  const interval = setInterval(() => {
+    const elapsed = (new Date().getTime() - sessionStartTime.getTime()) / 60000;
+    setMinutesUsed(Math.ceil(elapsed));
+  }, 1000);
+  return () => clearInterval(interval);
+}, [sessionStartTime]);
+```
+
+#### 6. Usage Enforcement
+
+**Check before allowing connection:**
+
+```typescript
+const handleStartLearning = async () => {
+  const { subscription } = await fetch('/api/subscription/check').then(r => r.json());
+  
+  if (!subscription || subscription.status !== 'active') {
+    showUpgradeModal();
+    return;
+  }
+  
+  if (subscription.usedMinutes >= subscription.includedMinutes) {
+    showUpgradeModal('You've used all your minutes. Upgrade for more!');
+    return;
+  }
+  
+  // Start session
+};
+```
+
+#### 7. Pricing Page
+
+**New page: `client/src/pages/pricing-page.tsx`**
+
+```typescript
+const plans = [
+  { name: 'Starter', price: 19, minutes: 60, priceId: 'starter' },
+  { name: 'Standard', price: 59, minutes: 240, priceId: 'standard' },
+  { name: 'Pro', price: 99, minutes: 600, priceId: 'pro' },
+];
+
+<div className="pricing-grid">
+  {plans.map(plan => (
+    <div key={plan.name} className="plan-card">
+      <h3>{plan.name}</h3>
+      <div className="price">${plan.price}/mo</div>
+      <div>{plan.minutes} minutes</div>
+      <button onClick={() => handleSubscribe(plan.priceId)}>
+        Subscribe
+      </button>
+    </div>
+  ))}
+</div>
+```
+
+#### 8. Customer Portal Link
+
+Allow users to manage their subscription:
+
+```typescript
+router.post('/create-portal-session', async (req, res) => {
+  const { customerId } = req.body;
+  
+  const session = await stripe.billingPortal.sessions.create({
+    customer: customerId,
+    return_url: `${process.env.APP_URL}/dashboard`,
+  });
+  
+  res.json({ url: session.url });
+});
+```
+
+---
+
+### TESTING CHECKLIST:
+
+- [ ] User can view pricing page
+- [ ] Checkout redirects to Stripe
+- [ ] Promo codes work at checkout
+- [ ] Webhook creates subscription after payment
+- [ ] Minutes are tracked per session
+- [ ] Timer shows during active session
+- [ ] Usage prevents connection when limit reached
+- [ ] Monthly reset works on renewal
+- [ ] Customer portal allows cancellation
+- [ ] Canceled users can't start sessions
+
+---
+
+### DEPLOYMENT NOTES:
+
+1. Set Stripe webhook endpoint: `https://your-app.com/api/webhooks/stripe`
+2. Add webhook secret to environment
+3. Test with Stripe test mode first
+4. Create promo codes in Stripe dashboard for trials
+
+This is launch-ready billing infrastructure. Expect 1-2 days of focused implementation.
