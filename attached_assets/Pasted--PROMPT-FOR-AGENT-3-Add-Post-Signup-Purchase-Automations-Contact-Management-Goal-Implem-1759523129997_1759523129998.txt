@@ -1,0 +1,351 @@
+## PROMPT FOR AGENT 3: Add Post-Signup/Purchase Automations & Contact Management
+
+**Goal:** Implement automated email flows, student profile collection, and contact management for remarketing with opt-out capabilities.
+
+---
+
+### 1. Student Profile Collection During Signup
+
+**Expand registration form to capture student data:**
+
+```typescript
+// client/src/pages/auth-page.tsx - Registration form
+const registrationSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  parentName: z.string().min(1),
+  studentName: z.string().min(1),
+  studentAge: z.number().min(5).max(18),
+  gradeLevel: z.enum(['kindergarten-2', 'grades-3-5', 'grades-6-8', 'grades-9-12', 'college-adult']),
+  primarySubject: z.enum(['math', 'english', 'science', 'spanish', 'general']),
+  marketingOptIn: z.boolean(), // Checkbox for email updates
+});
+```
+
+**Update database schema:**
+
+```typescript
+// Add to users table
+{
+  parentName: string;
+  studentName: string;
+  studentAge: number;
+  gradeLevel: string;
+  primarySubject: string;
+  marketingOptIn: boolean;
+  marketingOptInDate: Date | null;
+}
+```
+
+---
+
+### 2. Email Service Integration
+
+**Use a transactional email service (choose one):**
+- **Resend** (recommended - simple, modern)
+- **SendGrid**
+- **Mailgun**
+
+**Setup environment variables:**
+```
+RESEND_API_KEY=re_xxx
+FROM_EMAIL=hello@yourdomain.com
+ADMIN_EMAIL=your@email.com
+```
+
+**Create email service:**
+
+```typescript
+// server/services/email-service.ts
+import { Resend } from 'resend';
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+export class EmailService {
+  
+  async sendWelcomeEmail(user: {
+    email: string;
+    parentName: string;
+    studentName: string;
+  }) {
+    await resend.emails.send({
+      from: process.env.FROM_EMAIL!,
+      to: user.email,
+      subject: 'Welcome to AI Tutor!',
+      html: `
+        <h1>Welcome, ${user.parentName}!</h1>
+        <p>Thank you for creating an account for ${user.studentName}.</p>
+        <p>We're excited to help ${user.studentName} learn and grow with AI-powered tutoring.</p>
+        <h2>Getting Started:</h2>
+        <ul>
+          <li>Choose a subscription plan that fits your needs</li>
+          <li>Upload study materials (optional)</li>
+          <li>Connect with your AI tutor and start learning</li>
+        </ul>
+        <a href="${process.env.APP_URL}/pricing" style="display:inline-block;padding:12px 24px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;">View Plans</a>
+        <p style="margin-top:24px;color:#666;font-size:14px;">
+          If you no longer wish to receive updates, <a href="${process.env.APP_URL}/unsubscribe?email=${user.email}">unsubscribe here</a>.
+        </p>
+      `
+    });
+  }
+
+  async sendSubscriptionConfirmation(user: {
+    email: string;
+    parentName: string;
+    studentName: string;
+    plan: string;
+    minutes: number;
+  }) {
+    await resend.emails.send({
+      from: process.env.FROM_EMAIL!,
+      to: user.email,
+      subject: 'Thank You for Subscribing!',
+      html: `
+        <h1>Thank You, ${user.parentName}!</h1>
+        <p>Your ${user.plan} plan is now active for ${user.studentName}.</p>
+        <h2>Your Plan Details:</h2>
+        <ul>
+          <li><strong>Plan:</strong> ${user.plan}</li>
+          <li><strong>Minutes per month:</strong> ${user.minutes}</li>
+          <li><strong>Subjects:</strong> Math, English, Science, Spanish</li>
+        </ul>
+        <p>Start your first tutoring session now:</p>
+        <a href="${process.env.APP_URL}/dashboard" style="display:inline-block;padding:12px 24px;background:#dc2626;color:white;text-decoration:none;border-radius:6px;">Go to Dashboard</a>
+        <p style="margin-top:24px;">Questions? Reply to this email anytime.</p>
+        <p style="margin-top:24px;color:#666;font-size:14px;">
+          <a href="${process.env.APP_URL}/unsubscribe?email=${user.email}">Unsubscribe from marketing emails</a>
+        </p>
+      `
+    });
+  }
+
+  async sendTopUpConfirmation(user: {
+    email: string;
+    parentName: string;
+    minutesPurchased: number;
+  }) {
+    await resend.emails.send({
+      from: process.env.FROM_EMAIL!,
+      to: user.email,
+      subject: 'Minutes Added Successfully',
+      html: `
+        <h1>Minutes Added!</h1>
+        <p>Hi ${user.parentName},</p>
+        <p>We've added ${minutesPurchased} minutes to your account.</p>
+        <a href="${process.env.APP_URL}/dashboard">Continue Learning</a>
+      `
+    });
+  }
+
+  async sendAdminNotification(type: string, data: any) {
+    await resend.emails.send({
+      from: process.env.FROM_EMAIL!,
+      to: process.env.ADMIN_EMAIL!,
+      subject: `New ${type}`,
+      html: JSON.stringify(data, null, 2)
+    });
+  }
+}
+
+export const emailService = new EmailService();
+```
+
+---
+
+### 3. Trigger Emails After Events
+
+**After account creation:**
+
+```typescript
+// server/routes/auth.ts
+app.post("/api/register", async (req, res) => {
+  const user = await storage.createUser({
+    ...req.body,
+    password: await hashPassword(req.body.password),
+  });
+
+  // Send welcome email
+  await emailService.sendWelcomeEmail({
+    email: user.email,
+    parentName: user.parentName,
+    studentName: user.studentName,
+  });
+
+  // Notify admin
+  await emailService.sendAdminNotification('Account Created', {
+    email: user.email,
+    studentName: user.studentName,
+    gradeLevel: user.gradeLevel,
+    marketingOptIn: user.marketingOptIn,
+  });
+
+  res.status(201).json(user);
+});
+```
+
+**After subscription purchase:**
+
+```typescript
+// server/routes/webhooks.ts
+case 'checkout.session.completed':
+  const session = event.data.object;
+  
+  if (session.mode === 'subscription') {
+    const user = await storage.getUserById(session.metadata.userId);
+    const plan = getPlanFromAmount(session.amount_total);
+    
+    // Send confirmation email
+    await emailService.sendSubscriptionConfirmation({
+      email: user.email,
+      parentName: user.parentName,
+      studentName: user.studentName,
+      plan: plan.name,
+      minutes: plan.minutes,
+    });
+    
+    // Notify admin
+    await emailService.sendAdminNotification('New Subscription', {
+      email: user.email,
+      plan: plan.name,
+      amount: session.amount_total / 100,
+    });
+  }
+  break;
+```
+
+---
+
+### 4. Contact Management & Export
+
+**Create contacts endpoint for admin:**
+
+```typescript
+// server/routes/admin.ts
+router.get('/contacts/export', requireAdmin, async (req, res) => {
+  const { marketingOptIn } = req.query;
+  
+  const users = await storage.getUsers({
+    marketingOptIn: marketingOptIn === 'true' ? true : undefined,
+  });
+  
+  const contacts = users.map(u => ({
+    email: u.email,
+    parentName: u.parentName,
+    studentName: u.studentName,
+    gradeLevel: u.gradeLevel,
+    primarySubject: u.primarySubject,
+    subscriptionStatus: u.subscriptionStatus,
+    marketingOptIn: u.marketingOptIn,
+    createdAt: u.createdAt,
+  }));
+  
+  // Return as CSV
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename=contacts.csv');
+  
+  const csv = [
+    Object.keys(contacts[0]).join(','),
+    ...contacts.map(c => Object.values(c).join(','))
+  ].join('\n');
+  
+  res.send(csv);
+});
+```
+
+---
+
+### 5. Unsubscribe Flow
+
+**Create unsubscribe page:**
+
+```typescript
+// client/src/pages/unsubscribe-page.tsx
+export function UnsubscribePage() {
+  const [email] = useSearchParams();
+  const [status, setStatus] = useState('pending');
+  
+  const handleUnsubscribe = async () => {
+    await fetch('/api/unsubscribe', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.get('email') }),
+    });
+    setStatus('success');
+  };
+  
+  return (
+    <div className="unsubscribe-page">
+      {status === 'pending' ? (
+        <>
+          <h1>Unsubscribe from Marketing Emails</h1>
+          <p>You'll no longer receive promotional emails, but will still get important account updates.</p>
+          <button onClick={handleUnsubscribe}>Confirm Unsubscribe</button>
+        </>
+      ) : (
+        <p>You've been unsubscribed successfully.</p>
+      )}
+    </div>
+  );
+}
+```
+
+**Backend unsubscribe handler:**
+
+```typescript
+// server/routes/unsubscribe.ts
+router.post('/unsubscribe', async (req, res) => {
+  const { email } = req.body;
+  
+  await storage.updateUser(email, {
+    marketingOptIn: false,
+    marketingOptOutDate: new Date(),
+  });
+  
+  res.json({ success: true });
+});
+```
+
+---
+
+### 6. Marketing Email Preferences in Account Settings
+
+```typescript
+// client/src/pages/settings-page.tsx
+<div className="email-preferences">
+  <h3>Email Preferences</h3>
+  <label>
+    <input
+      type="checkbox"
+      checked={user.marketingOptIn}
+      onChange={handleToggleMarketing}
+    />
+    Send me updates, tips, and promotional emails
+  </label>
+</div>
+```
+
+---
+
+### COMPLIANCE REQUIREMENTS:
+
+- [ ] Every marketing email includes unsubscribe link
+- [ ] Unsubscribe is immediate (no delay)
+- [ ] Transactional emails (receipts, confirmations) still sent after opt-out
+- [ ] User can re-opt-in anytime in settings
+- [ ] Export includes opt-in status and date
+- [ ] Store opt-out date for record keeping
+
+---
+
+### TESTING CHECKLIST:
+
+- [ ] Welcome email sent after account creation
+- [ ] Thank you email sent after subscription purchase
+- [ ] Top-up confirmation email sent after minute purchase
+- [ ] Admin notifications work for new signups/subscriptions
+- [ ] Unsubscribe link works and updates database
+- [ ] Opted-out users don't receive marketing emails
+- [ ] Contact export includes all relevant fields
+- [ ] Email preferences toggle works in settings
+
+This gives you a complete email automation system with proper opt-out management for remarketing.
