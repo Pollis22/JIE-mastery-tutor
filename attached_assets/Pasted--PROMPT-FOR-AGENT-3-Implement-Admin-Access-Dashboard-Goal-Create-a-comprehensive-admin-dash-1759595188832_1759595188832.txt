@@ -1,0 +1,401 @@
+# PROMPT FOR AGENT 3: Implement Admin Access Dashboard
+
+## Goal
+Create a comprehensive admin dashboard that allows administrators to monitor and manage the AI tutoring platform, including user management, subscription oversight, document management, and system analytics.
+
+---
+
+## REQUIREMENTS
+
+### 1. Admin Authentication & Authorization
+
+**Create Admin Role System:**
+- Add `role` field to User model: `'user' | 'admin'`
+- Implement admin-only middleware for protected routes
+- Create admin login flow (separate from regular users or flag-based)
+
+**File: `server/middleware/admin-auth.ts`** (new file)
+```typescript
+export const requireAdmin = async (req, res, next) => {
+  // Verify user is authenticated
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  
+  // Verify user has admin role
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  next();
+};
+```
+
+---
+
+### 2. Admin Dashboard UI
+
+**Create Admin Routes:**
+- `/admin` - Main dashboard overview
+- `/admin/users` - User management
+- `/admin/subscriptions` - Subscription management  
+- `/admin/documents` - Document oversight
+- `/admin/agents` - ElevenLabs agent monitoring
+- `/admin/analytics` - Platform analytics
+
+**File: `client/src/pages/AdminDashboard.tsx`** (new file)
+
+Create a dashboard with:
+- Navigation sidebar with sections above
+- Overview cards showing key metrics:
+  - Total users
+  - Active subscriptions
+  - Total credits used this month
+  - Active tutoring sessions
+  - Documents uploaded
+- Recent activity feed
+- Quick actions (create user, view reports, etc.)
+
+**Design Requirements:**
+- Use Tailwind for styling
+- Mobile-responsive layout
+- Clear visual hierarchy
+- Admin-only header indicator
+
+---
+
+### 3. User Management Panel
+
+**File: `client/src/pages/AdminUsers.tsx`** (new file)
+
+**Features:**
+- Searchable/filterable user list
+- Display columns:
+  - Name, Email, Grade Level, Role
+  - Subscription status
+  - Credits remaining
+  - Account created date
+  - Last active date
+- Actions per user:
+  - View full profile
+  - Edit user details
+  - Reset password
+  - Add/remove credits manually
+  - Change subscription
+  - Suspend/activate account
+  - Delete account (with confirmation)
+
+**Backend API Routes:**
+```
+GET    /api/admin/users - List all users with filters
+GET    /api/admin/users/:id - Get user details
+PATCH  /api/admin/users/:id - Update user
+DELETE /api/admin/users/:id - Delete user
+POST   /api/admin/users/:id/credits - Add/remove credits
+PATCH  /api/admin/users/:id/status - Suspend/activate
+```
+
+---
+
+### 4. Subscription Management
+
+**File: `client/src/pages/AdminSubscriptions.tsx`** (new file)
+
+**Features:**
+- View all subscriptions (active, paused, cancelled)
+- Filter by plan tier (Basic, Standard, Premium)
+- Display columns:
+  - User name/email
+  - Plan name
+  - Status
+  - Start date
+  - Next billing date
+  - MRR (Monthly Recurring Revenue)
+- Actions:
+  - Override subscription (change plan manually)
+  - Pause/resume subscription
+  - Cancel subscription
+  - Refund (mark as refunded)
+  - View payment history
+
+**Analytics Display:**
+- MRR (Monthly Recurring Revenue)
+- Total active subscriptions by tier
+- Churn rate
+- Upcoming renewals (next 7/30 days)
+- Revenue graphs (monthly trends)
+
+**Backend API Routes:**
+```
+GET    /api/admin/subscriptions - List all subscriptions
+GET    /api/admin/subscriptions/analytics - Get subscription analytics
+PATCH  /api/admin/subscriptions/:id - Modify subscription
+POST   /api/admin/subscriptions/:id/refund - Process refund
+```
+
+---
+
+### 5. Document Management
+
+**File: `client/src/pages/AdminDocuments.tsx`** (new file)
+
+**Features:**
+- View all uploaded documents across all users
+- Filter by:
+  - User
+  - Subject area
+  - Upload date
+  - File type
+- Display columns:
+  - Document name
+  - Owner (user)
+  - File size
+  - Upload date
+  - Subject/grade level
+  - Status (active, archived)
+- Actions:
+  - Preview document
+  - Download document
+  - Delete document (with confirmation)
+  - Flag inappropriate content
+
+**Storage Analytics:**
+- Total storage used
+- Storage by user
+- Storage by file type
+- Storage trends over time
+
+**Backend API Routes:**
+```
+GET    /api/admin/documents - List all documents
+GET    /api/admin/documents/:id - Get document details
+DELETE /api/admin/documents/:id - Delete document
+GET    /api/admin/documents/analytics - Storage analytics
+```
+
+---
+
+### 6. ElevenLabs Agent Monitoring
+
+**File: `client/src/pages/AdminAgents.tsx`** (new file)
+
+**Features:**
+- View dynamically created agents
+- Display columns:
+  - Agent ID
+  - User (who it was created for)
+  - Created timestamp
+  - Status (active, deleted, cached)
+  - Documents attached
+  - Total conversation minutes
+- Actions:
+  - View agent configuration
+  - Delete orphaned agents
+  - Force cleanup of stale agents
+
+**Monitoring:**
+- Active agent count
+- Total voice minutes used (current month)
+- Agent creation/deletion rate
+- Cost projection
+
+**Backend API Routes:**
+```
+GET    /api/admin/agents - List all agents
+DELETE /api/admin/agents/:id - Delete agent
+GET    /api/admin/agents/cleanup - Cleanup stale agents
+GET    /api/admin/agents/analytics - Usage analytics
+```
+
+---
+
+### 7. Platform Analytics
+
+**File: `client/src/pages/AdminAnalytics.tsx`** (new file)
+
+**Metrics to Display:**
+
+**User Metrics:**
+- Total users (with growth trend)
+- Active users (last 7/30 days)
+- User registration by date (chart)
+- Users by grade level (pie chart)
+- User retention rate
+
+**Usage Metrics:**
+- Total tutoring sessions
+- Average session length
+- Credits used (by day/week/month)
+- Most active subjects
+- Peak usage times
+
+**Financial Metrics:**
+- MRR (Monthly Recurring Revenue)
+- Total revenue (lifetime)
+- Revenue by plan tier
+- Average revenue per user (ARPU)
+- Churn rate
+
+**Technical Metrics:**
+- ElevenLabs API usage
+- Document storage usage
+- Error rates
+- API response times
+
+**Visualizations:**
+- Use recharts library for graphs
+- Line charts for trends over time
+- Pie charts for distribution
+- Bar charts for comparisons
+
+**Backend API Routes:**
+```
+GET /api/admin/analytics/users - User analytics
+GET /api/admin/analytics/usage - Usage analytics
+GET /api/admin/analytics/revenue - Revenue analytics
+GET /api/admin/analytics/technical - Technical metrics
+```
+
+---
+
+### 8. Activity Log / Audit Trail
+
+**Features:**
+- Log all admin actions for accountability
+- Display recent admin actions:
+  - Action type (user edited, subscription changed, etc.)
+  - Admin who performed action
+  - Timestamp
+  - Details of change
+- Filter by admin, action type, date range
+
+**Database Model:**
+```typescript
+AdminLog {
+  id: string
+  adminId: string
+  action: string
+  targetType: 'user' | 'subscription' | 'document' | 'agent'
+  targetId: string
+  details: json
+  timestamp: datetime
+}
+```
+
+---
+
+## IMPLEMENTATION STEPS
+
+### Phase 1: Backend Setup
+1. Add admin role to User model
+2. Create admin authentication middleware
+3. Implement all admin API routes with proper authorization
+4. Add audit logging to all admin actions
+
+### Phase 2: Frontend Setup
+1. Create admin layout with navigation
+2. Build dashboard overview page
+3. Implement route protection for admin pages
+
+### Phase 3: Feature Implementation
+1. Build user management panel
+2. Build subscription management panel
+3. Build document management panel
+4. Build agent monitoring panel
+5. Build analytics dashboard
+
+### Phase 4: Testing & Polish
+1. Test all admin actions
+2. Verify authorization (non-admins blocked)
+3. Test data exports
+4. Mobile responsive testing
+5. Add loading states and error handling
+
+---
+
+## SECURITY REQUIREMENTS
+
+**Critical:**
+- All admin routes MUST require authentication + admin role
+- Never expose admin APIs to regular users
+- Log all admin actions with audit trail
+- Implement rate limiting on admin endpoints
+- Use confirmation dialogs for destructive actions
+- Sanitize all inputs
+- Don't expose sensitive data (passwords, API keys) in admin views
+
+---
+
+## DESIGN GUIDELINES
+
+**UI/UX:**
+- Clean, professional admin interface
+- Clear visual indicators (you're in admin mode)
+- Use data tables with sorting/filtering
+- Implement pagination for large datasets
+- Show loading states for async operations
+- Error messages should be clear and actionable
+- Success confirmations for actions
+
+**Color Scheme:**
+- Admin navbar: darker theme to distinguish from regular app
+- Status indicators: Green (active), Yellow (warning), Red (error)
+- Use existing Tailwind color palette
+
+---
+
+## FIRST ADMIN USER SETUP
+
+Create a one-time migration script or manual process to set the first admin:
+
+**Option 1: Migration Script**
+```typescript
+// One-time script to make a user admin
+// Run: npm run make-admin email@example.com
+```
+
+**Option 2: Environment Variable**
+Set `ADMIN_EMAILS=admin@jiemastery.ai,admin2@jiemastery.ai` and automatically grant admin role on signup
+
+---
+
+## DELIVERABLES
+
+1. ✅ Admin authentication & middleware
+2. ✅ Admin dashboard layout
+3. ✅ User management panel
+4. ✅ Subscription management panel
+5. ✅ Document management panel
+6. ✅ Agent monitoring panel
+7. ✅ Analytics dashboard
+8. ✅ Audit log system
+9. ✅ All backend API routes
+10. ✅ Security implementation
+11. ✅ Mobile-responsive design
+
+---
+
+## TESTING CHECKLIST
+
+- [ ] Non-admin users cannot access `/admin` routes
+- [ ] All admin actions logged to audit trail
+- [ ] User CRUD operations work correctly
+- [ ] Subscription modifications work
+- [ ] Document deletion works and updates storage
+- [ ] Agent cleanup works and syncs with ElevenLabs
+- [ ] Analytics display accurate data
+- [ ] Data exports work (CSV downloads)
+- [ ] Mobile responsive on all admin pages
+- [ ] Error handling for failed operations
+
+---
+
+## NOTES
+
+- Prioritize security over convenience
+- Keep admin UI simple and functional
+- Don't over-engineer - focus on core admin needs
+- Consider adding export functionality (users to CSV, analytics to CSV, etc.)
+- May want to add email functionality (email users from admin panel)
+
+Let me know when you're ready to implement and if you have questions!
