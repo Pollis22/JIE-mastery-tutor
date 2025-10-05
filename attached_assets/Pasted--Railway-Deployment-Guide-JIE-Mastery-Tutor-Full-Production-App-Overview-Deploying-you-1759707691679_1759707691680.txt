@@ -1,0 +1,488 @@
+# Railway Deployment Guide - JIE Mastery Tutor (Full Production App)
+
+## Overview
+
+Deploying your **complete full-stack application** to Railway:
+- React + TypeScript frontend
+- Express + PostgreSQL backend (17 tables)
+- Stripe, Resend, ElevenLabs, OpenAI integrations
+- Admin dashboard
+- User authentication
+- Document upload & RAG system
+
+---
+
+## Pre-Deployment Checklist
+
+### 1. Verify Current Project Structure
+
+Your app should have:
+```
+/
+├── client/              # React frontend
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.ts
+├── server/              # Express backend
+│   ├── index.ts
+│   ├── routes/
+│   ├── db/
+│   └── middleware/
+├── db/                  # PostgreSQL schema
+│   └── schema.ts
+├── package.json         # Root package.json
+└── .env.example
+```
+
+### 2. Update Root package.json
+
+```json
+{
+  "name": "jie-mastery-tutor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "cd client && npm install && npm run build",
+    "build:server": "tsc -p server/tsconfig.json",
+    "start": "node dist/server/index.js",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "cd client && npm run dev",
+    "db:push": "drizzle-kit push",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
+```
+
+### 3. Create railway.json (Railpack Configuration)
+
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "RAILPACK"
+  },
+  "deploy": {
+    "startCommand": "npm run start",
+    "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
+
+### 4. Verify Health Check Endpoint
+
+Ensure your Express server has:
+
+```typescript
+// server/index.ts or server/routes/health.ts
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: 'connected' // Add DB ping if you want
+  });
+});
+```
+
+### 5. Update Server to Serve React Build
+
+```typescript
+// server/index.ts
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// API routes
+app.use('/api', apiRoutes);
+
+// Serve React static files in production
+if (process.env.NODE_ENV === 'production') {
+  const clientBuildPath = path.join(__dirname, '../../client/dist');
+  app.use(express.static(clientBuildPath));
+  
+  // Handle React routing - send all non-API requests to index.html
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientBuildPath, 'index.html'));
+  });
+}
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
+```
+
+---
+
+## Railway Deployment Steps
+
+### Step 1: Create Railway Project with PostgreSQL
+
+1. **Go to Railway Dashboard**
+   - Click "New Project"
+   - Select "Deploy from GitHub repo"
+   - Choose `Pollis22/JIE-mastery-tutor`
+
+2. **Add PostgreSQL Database**
+   - In your Railway project, click "New"
+   - Select "Database" → "PostgreSQL"
+   - Railway will provision a database and create `DATABASE_URL` variable
+
+### Step 2: Configure Environment Variables
+
+Add ALL environment variables from your Replit project:
+
+**Database:**
+```bash
+DATABASE_URL=postgresql://[auto-generated-by-railway]
+```
+
+**Stripe:**
+```bash
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_PUBLISHABLE_KEY=pk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_BASIC=price_...
+STRIPE_PRICE_ID_PREMIUM=price_...
+STRIPE_PRICE_ID_ELITE=price_...
+```
+
+**ElevenLabs:**
+```bash
+ELEVENLABS_API_KEY=sk_...
+ELEVENLABS_AGENT_ID_KINDERGARTEN=agent_...
+ELEVENLABS_AGENT_ID_ELEMENTARY=agent_...
+ELEVENLABS_AGENT_ID_MIDDLE=agent_...
+ELEVENLABS_AGENT_ID_HIGH=agent_...
+ELEVENLABS_AGENT_ID_COLLEGE=agent_...
+```
+
+**OpenAI (for RAG):**
+```bash
+OPENAI_API_KEY=sk-proj-...
+```
+
+**Resend (Email):**
+```bash
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=hello@jiemastery.ai
+```
+
+**App Configuration:**
+```bash
+NODE_ENV=production
+SESSION_SECRET=[generate-random-32-char-string]
+FRONTEND_URL=https://your-app.up.railway.app
+ALLOWED_ORIGINS=https://your-app.up.railway.app
+```
+
+**Admin Configuration:**
+```bash
+ADMIN_EMAIL=your-admin-email@example.com
+```
+
+### Step 3: Database Migration
+
+**Option A: Auto-migrate on deployment**
+
+Add to your `package.json` scripts:
+```json
+{
+  "scripts": {
+    "build": "npm run db:push && npm run build:client && npm run build:server"
+  }
+}
+```
+
+**Option B: Manual migration via Railway CLI**
+
+```bash
+# Install Railway CLI
+npm install -g @railway/cli
+
+# Login
+railway login
+
+# Link to project
+railway link
+
+# Run migration
+railway run npm run db:push
+```
+
+### Step 4: Build Configuration
+
+Railway will automatically:
+1. Install dependencies (`npm install`)
+2. Run build command (`npm run build`)
+3. Start the app (`npm run start`)
+
+**Verify your build works locally first:**
+```bash
+npm run build
+NODE_ENV=production npm start
+# Test at http://localhost:3000
+```
+
+### Step 5: Domain Configuration
+
+**Railway Subdomain (Automatic):**
+- Railway generates: `jie-mastery-tutor-production.up.railway.app`
+- Click "Generate Domain" in Railway dashboard
+
+**Custom Domain (jiemastery.ai):**
+
+1. In Railway dashboard:
+   - Go to Settings → Domains
+   - Click "Add Domain"
+   - Enter `jiemastery.ai`
+
+2. In GoDaddy DNS:
+   - Add CNAME record:
+     ```
+     Type: CNAME
+     Name: @
+     Value: [railway-provided-cname]
+     TTL: 600
+     ```
+
+3. Update environment variables:
+   ```bash
+   FRONTEND_URL=https://jiemastery.ai
+   ALLOWED_ORIGINS=https://jiemastery.ai
+   ```
+
+---
+
+## Post-Deployment Configuration
+
+### 1. Update Stripe Webhook URL
+
+In Stripe Dashboard:
+- Go to Developers → Webhooks
+- Update webhook endpoint to: `https://jiemastery.ai/api/webhooks/stripe`
+- Copy new webhook secret to Railway env vars
+
+### 2. Test Critical Flows
+
+**Authentication:**
+- [ ] Create new account
+- [ ] Receive welcome email (Resend)
+- [ ] Login works
+- [ ] Session persists
+
+**Subscription:**
+- [ ] Click subscribe button
+- [ ] Stripe checkout loads
+- [ ] Payment processes
+- [ ] Webhook updates subscription status
+- [ ] Receive confirmation email
+
+**Tutoring:**
+- [ ] Select age-appropriate tutor
+- [ ] ElevenLabs widget loads
+- [ ] Voice conversation works
+- [ ] Minutes are tracked
+- [ ] Usage limits enforced
+
+**Admin Dashboard:**
+- [ ] Admin login works
+- [ ] Can view users
+- [ ] Can export contacts
+- [ ] Can view subscriptions
+- [ ] Analytics display
+
+### 3. Set Up Monitoring
+
+**Railway Built-in:**
+- View logs: Project → Deployments → Logs
+- Monitor metrics: CPU, Memory, Network usage
+- Set up alerts for errors
+
+**Optional External Monitoring:**
+- Sentry for error tracking
+- LogRocket for user session replay
+- Posthog for product analytics
+
+---
+
+## Troubleshooting
+
+### Build Fails
+
+**Issue:** "Cannot find module 'X'"
+**Fix:** Ensure all dependencies are in `package.json`, run `npm install`
+
+**Issue:** TypeScript compilation errors
+**Fix:** Check `tsconfig.json` paths, ensure all files compile locally first
+
+### Database Connection Fails
+
+**Issue:** "ECONNREFUSED" or "Connection timeout"
+**Fix:** 
+- Verify `DATABASE_URL` is set correctly
+- Check Railway PostgreSQL service is running
+- Ensure database migration ran successfully
+
+### 404 on React Routes
+
+**Issue:** Refreshing `/pricing` or `/admin` returns 404
+**Fix:** Ensure Express catch-all route serves `index.html` (see Step 5 above)
+
+### CORS Errors
+
+**Issue:** "Access to fetch at ... from origin ... has been blocked"
+**Fix:**
+- Update `ALLOWED_ORIGINS` environment variable
+- Verify CORS middleware includes Railway domain
+- Check `FRONTEND_URL` matches actual domain
+
+### Stripe Webhook Fails
+
+**Issue:** Subscription not activating after payment
+**Fix:**
+- Verify webhook URL is correct in Stripe dashboard
+- Check `STRIPE_WEBHOOK_SECRET` matches Stripe
+- View webhook logs in Stripe dashboard
+- Check Railway logs for webhook errors
+
+### ElevenLabs Agent Not Loading
+
+**Issue:** Widget doesn't appear or fails to connect
+**Fix:**
+- Verify all 5 `ELEVENLABS_AGENT_ID_*` variables are set
+- Check API key is valid and has credits
+- Inspect browser console for errors
+- Verify agent IDs are correct in ElevenLabs dashboard
+
+---
+
+## Production Checklist
+
+Before launching to real users:
+
+**Security:**
+- [ ] All environment variables are Railway secrets (not in code)
+- [ ] `SESSION_SECRET` is strong random string
+- [ ] CORS configured for production domain only
+- [ ] HTTPS enforced (Railway does this automatically)
+- [ ] Rate limiting on API endpoints
+- [ ] SQL injection protection (using Drizzle ORM helps)
+
+**Performance:**
+- [ ] React production build is optimized
+- [ ] Database queries are indexed
+- [ ] Static assets are cached
+- [ ] Images are optimized
+- [ ] Lazy loading for heavy components
+
+**Reliability:**
+- [ ] Health check endpoint working
+- [ ] Error handling on all API routes
+- [ ] Database connection pooling configured
+- [ ] Graceful shutdown handling
+- [ ] Backup strategy for database
+
+**Business:**
+- [ ] Stripe in live mode (not test mode)
+- [ ] Real prices configured
+- [ ] Terms of service and privacy policy links
+- [ ] Support email configured
+- [ ] Admin access working
+
+**User Experience:**
+- [ ] All 5 tutors working across age ranges
+- [ ] Email notifications delivering
+- [ ] Payment flow smooth
+- [ ] Mobile responsive
+- [ ] Error messages user-friendly
+
+---
+
+## Rollback Plan
+
+If deployment fails:
+
+1. **Railway automatic rollback:**
+   - Go to Deployments tab
+   - Click "Rollback" on last working deployment
+
+2. **Keep Replit running temporarily:**
+   - Don't shut down Replit until Railway is stable
+   - Run both in parallel during migration
+   - Switch DNS only after Railway is verified
+
+3. **Database backup:**
+   ```bash
+   # Export from Replit PostgreSQL
+   pg_dump $DATABASE_URL > backup.sql
+   
+   # Import to Railway if needed
+   psql $RAILWAY_DATABASE_URL < backup.sql
+   ```
+
+---
+
+## Next Steps After Deployment
+
+1. **Monitor first 24 hours closely**
+   - Watch Railway logs
+   - Test all critical flows
+   - Have admin account ready for support
+
+2. **Gradual traffic migration**
+   - Update DNS to Railway
+   - Monitor for issues
+   - Keep Replit as backup for 1 week
+
+3. **Performance optimization**
+   - Review Railway metrics
+   - Optimize slow endpoints
+   - Consider scaling if needed
+
+4. **Launch marketing**
+   - Enable remarketing to free users
+   - Export contacts for campaigns
+   - Monitor conversion rates
+
+---
+
+## Cost Estimation
+
+**Railway Pricing (as of 2025):**
+- Hobby Plan: $5/month (includes $5 usage credit)
+- Pro Plan: $20/month (includes $20 usage credit)
+- Additional usage: Pay-as-you-go
+
+**Typical costs for your app:**
+- Web service: ~$5-10/month
+- PostgreSQL: ~$5-10/month
+- Bandwidth: ~$2-5/month
+- **Total estimated: $12-25/month**
+
+(Note: Costs scale with traffic. Monitor usage in Railway dashboard.)
+
+---
+
+## Support Resources
+
+- **Railway Docs:** https://docs.railway.com
+- **Railway Discord:** https://discord.gg/railway
+- **Railway Status:** https://status.railway.com
+- **This app's logs:** Project → Deployments → Logs
+
+Good luck with your deployment! 🚀
