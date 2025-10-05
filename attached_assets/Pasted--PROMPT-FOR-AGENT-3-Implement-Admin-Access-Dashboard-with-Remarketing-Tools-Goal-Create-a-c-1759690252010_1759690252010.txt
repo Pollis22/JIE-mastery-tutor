@@ -1,0 +1,680 @@
+# PROMPT FOR AGENT 3: Implement Admin Access Dashboard with Remarketing Tools
+
+## Goal
+Create a comprehensive admin dashboard at `/admin` route that allows administrators to monitor and manage the AI tutoring platform, with special focus on customer contact management and remarketing capabilities.
+
+---
+
+## ADMIN ACCESS SETUP
+
+### How Admin Login Works:
+
+**Step 1: Make Your First Admin**
+Create a simple script to make any existing user an admin:
+
+**File: `server/scripts/make-admin.ts`** (new file)
+```typescript
+import { db } from '../db';
+
+async function makeAdmin(email: string) {
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email)
+  });
+  
+  if (!user) {
+    console.error(`User ${email} not found`);
+    return;
+  }
+  
+  await db.update(users)
+    .set({ role: 'admin' })
+    .where(eq(users.id, user.id));
+    
+  console.log(`✅ ${email} is now an admin!`);
+}
+
+// Run with: npm run make-admin
+const emailToMakeAdmin = process.env.ADMIN_EMAIL || 'your-email@jiemastery.ai';
+makeAdmin(emailToMakeAdmin);
+```
+
+**Step 2: Login Process**
+1. Go to `jiemastery.ai` and log in with your regular account
+2. Once your account has `role: 'admin'` (from script above)
+3. Navigate to `jiemastery.ai/admin` 
+4. The app checks your role and grants access
+5. If you're not an admin, you get redirected to home page
+
+**Step 3: Show Admin Button (Optional)**
+Only show "Admin Panel" button in navbar if user has admin role:
+
+```tsx
+{user?.role === 'admin' && (
+  <Link to="/admin" className="text-sm text-gray-700 hover:text-gray-900">
+    Admin Panel
+  </Link>
+)}
+```
+
+---
+
+## 1. Admin Authentication & Authorization
+
+**Update User Model:**
+Add `role` field to User schema:
+```typescript
+export const users = pgTable('users', {
+  id: serial('id').primaryKey(),
+  email: text('email').unique().notNull(),
+  name: text('name').notNull(),
+  role: text('role').default('user').notNull(), // 'user' | 'admin'
+  // ... other fields
+});
+```
+
+**File: `server/middleware/admin-auth.ts`** (new file)
+```typescript
+export const requireAdmin = async (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  next();
+};
+```
+
+**File: `client/src/components/AdminRoute.tsx`** (new file)
+```tsx
+import { Navigate } from 'react-router-dom';
+import { useUser } from '@/hooks/use-user';
+
+export function AdminRoute({ children }) {
+  const { user, isLoading } = useUser();
+  
+  if (isLoading) return <div>Loading...</div>;
+  
+  if (!user || user.role !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+  
+  return children;
+}
+```
+
+---
+
+## 2. Admin Dashboard UI
+
+**Create Admin Routes:**
+- `/admin` - Main dashboard with quick access to remarketing
+- `/admin/contacts` - **PRIORITY: Marketing contact management**
+- `/admin/users` - User management
+- `/admin/subscriptions` - Subscription management  
+- `/admin/documents` - Document oversight
+- `/admin/agents` - ElevenLabs agent monitoring
+- `/admin/analytics` - Platform analytics
+
+**File: `client/src/pages/AdminDashboard.tsx`** (new file)
+
+Create a dashboard with:
+- **Remarketing Quick Actions Section** (top priority):
+  - "Export All Contacts" button
+  - "Export Free Users" button
+  - "Export Cancelled Subscribers" button
+  - "Export Inactive Users (30+ days)" button
+- Overview cards showing key metrics:
+  - Total users
+  - Active subscriptions
+  - Total credits used this month
+  - Active tutoring sessions
+- Recent activity feed
+- Navigation to detailed sections
+
+**Design Requirements:**
+- Dark header bar with "🔒 ADMIN PANEL" indicator
+- Use Tailwind for styling
+- Mobile-responsive layout
+- Clear visual hierarchy
+
+---
+
+## 3. 🎯 PRIORITY: Contact Management & Remarketing Panel
+
+**File: `client/src/pages/AdminContacts.tsx`** (new file)
+
+### Core Features:
+
+**A. Smart Segmentation with One-Click Export**
+
+Pre-built segments for remarketing:
+
+```tsx
+const segments = [
+  {
+    name: "All Contacts",
+    description: "Every user in the system",
+    query: "all"
+  },
+  {
+    name: "Free Users (Never Subscribed)",
+    description: "Users who signed up but never paid",
+    query: "free-users"
+  },
+  {
+    name: "Cancelled Subscribers",
+    description: "Users who cancelled in last 90 days",
+    query: "cancelled"
+  },
+  {
+    name: "Trial Ended (No Purchase)",
+    description: "Trial period ended, didn't convert",
+    query: "trial-ended"
+  },
+  {
+    name: "Inactive Users (30+ Days)",
+    description: "Haven't logged in for 30+ days",
+    query: "inactive-30"
+  },
+  {
+    name: "Low Credits (< 100)",
+    description: "Active users running low on credits",
+    query: "low-credits"
+  },
+  {
+    name: "Active Premium Users",
+    description: "Current Premium subscribers",
+    query: "premium-active"
+  },
+  {
+    name: "High-Value Users",
+    description: "Users who've spent $100+",
+    query: "high-value"
+  }
+];
+```
+
+**Display for Each Segment:**
+- Segment name & description
+- Count of users in segment
+- "Preview Contacts" button (shows first 10)
+- "Export to CSV" button (downloads all)
+- Last exported date/time
+
+**B. Advanced Filters**
+
+Allow custom filtering:
+- Date range (joined between X and Y)
+- Subscription status (active, cancelled, never subscribed)
+- Grade level (target specific age groups)
+- Credits remaining (range slider)
+- Last active date (inactive for X days)
+- Subscription tier (Basic, Standard, Premium)
+- Email marketing consent (opted in/out)
+
+**C. Export Functionality**
+
+**CSV Export Format:**
+```csv
+Name,Email,Phone,Grade Level,Subscription Status,Plan Tier,Credits Remaining,Last Active,Days Since Active,Total Spent,Email Consent
+John Doe,john@email.com,555-1234,5th Grade,Active,Premium,450,2024-10-01,4,$39.99,Yes
+Jane Smith,jane@email.com,555-5678,3rd Grade,Cancelled,Basic,0,2024-08-15,51,$19.99,Yes
+```
+
+**Export Features:**
+- Clean, marketing-platform-ready format
+- Compatible with Mailchimp, ConvertKit, ActiveCampaign
+- Include only users with email marketing consent
+- Option to include/exclude phone numbers
+- Option to include/exclude cancelled users
+- Timestamp in filename: `contacts-export-2024-10-05.csv`
+
+**D. Suppression List Management**
+
+Track users who should NOT receive marketing emails:
+- Users who unsubscribed from marketing
+- Users who requested account deletion
+- Bounced email addresses
+- Spam complaints
+
+**Features:**
+- View suppression list
+- Manually add emails to suppression
+- Export suppression list
+- Auto-exclude suppressed emails from exports
+
+**E. Campaign Tracking**
+
+Track which users have been contacted:
+- Tag exports with campaign name
+- Log when each segment was exported
+- Track which users were included in each campaign
+- Prevent duplicate outreach
+
+**Example UI:**
+```tsx
+<div className="campaign-history">
+  <h3>Recent Campaigns</h3>
+  <table>
+    <tr>
+      <td>Q4 2024 Reactivation</td>
+      <td>Cancelled Subscribers</td>
+      <td>143 contacts</td>
+      <td>Oct 1, 2024</td>
+    </tr>
+    <tr>
+      <td>Back to School Promo</td>
+      <td>Free Users</td>
+      <td>287 contacts</td>
+      <td>Sept 15, 2024</td>
+    </tr>
+  </table>
+</div>
+```
+
+### Backend API Routes:
+
+```
+GET    /api/admin/contacts/segments - Get all predefined segments with counts
+GET    /api/admin/contacts/export/:segment - Export specific segment to CSV
+POST   /api/admin/contacts/export-custom - Export with custom filters
+GET    /api/admin/contacts/preview/:segment - Preview first 10 contacts
+GET    /api/admin/contacts/suppression - Get suppression list
+POST   /api/admin/contacts/suppression - Add to suppression list
+DELETE /api/admin/contacts/suppression/:email - Remove from suppression
+GET    /api/admin/contacts/campaigns - Get campaign history
+POST   /api/admin/contacts/campaigns - Log new campaign
+```
+
+### Implementation Details:
+
+**File: `server/routes/admin-contacts.ts`** (new file)
+
+```typescript
+// Example: Export free users who never subscribed
+router.get('/export/free-users', requireAdmin, async (req, res) => {
+  const users = await db.query.users.findMany({
+    where: and(
+      // No subscription record
+      notExists(
+        db.select().from(subscriptions)
+          .where(eq(subscriptions.userId, users.id))
+      ),
+      // Has marketing consent
+      eq(users.marketingConsent, true),
+      // Not in suppression list
+      notInArray(users.email, suppressionList)
+    ),
+    columns: {
+      name: true,
+      email: true,
+      phone: true,
+      gradeLevel: true,
+      createdAt: true,
+      lastActiveAt: true
+    }
+  });
+  
+  // Convert to CSV
+  const csv = convertToCSV(users);
+  
+  // Log the export
+  await logCampaign({
+    adminId: req.user.id,
+    campaignName: 'Free Users Export',
+    segment: 'free-users',
+    contactCount: users.length,
+    exportedAt: new Date()
+  });
+  
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="free-users-${Date.now()}.csv"`);
+  res.send(csv);
+});
+```
+
+---
+
+## 4. User Management Panel
+
+**File: `client/src/pages/AdminUsers.tsx`** (new file)
+
+**Features:**
+- Searchable/filterable user list
+- Display columns:
+  - Name, Email, Phone, Grade Level, Role
+  - Subscription status
+  - Credits remaining
+  - Email consent status
+  - Account created date
+  - Last active date
+- Actions per user:
+  - View full profile
+  - Edit user details
+  - Reset password
+  - Add/remove credits manually
+  - Change subscription
+  - Add to suppression list
+  - Suspend/activate account
+  - Delete account (with confirmation)
+
+**Backend API Routes:**
+```
+GET    /api/admin/users - List all users with filters
+GET    /api/admin/users/:id - Get user details
+PATCH  /api/admin/users/:id - Update user
+DELETE /api/admin/users/:id - Delete user
+POST   /api/admin/users/:id/credits - Add/remove credits
+PATCH  /api/admin/users/:id/status - Suspend/activate
+```
+
+---
+
+## 5. Subscription Management
+
+**File: `client/src/pages/AdminSubscriptions.tsx`** (new file)
+
+**Features:**
+- View all subscriptions (active, paused, cancelled)
+- Filter by plan tier (Basic, Standard, Premium)
+- Display columns:
+  - User name/email
+  - Plan name
+  - Status
+  - Start date
+  - Next billing date / Cancelled date
+  - MRR (Monthly Recurring Revenue)
+- Actions:
+  - Override subscription (change plan manually)
+  - Pause/resume subscription
+  - Cancel subscription
+  - Refund (mark as refunded)
+  - View payment history
+
+**Analytics Display:**
+- MRR (Monthly Recurring Revenue)
+- Churn rate this month
+- Total active subscriptions by tier
+- Upcoming renewals (next 7/30 days)
+- Revenue graphs (monthly trends)
+
+**Backend API Routes:**
+```
+GET    /api/admin/subscriptions - List all subscriptions
+GET    /api/admin/subscriptions/analytics - Get subscription analytics
+PATCH  /api/admin/subscriptions/:id - Modify subscription
+POST   /api/admin/subscriptions/:id/refund - Process refund
+```
+
+---
+
+## 6. Document Management
+
+**File: `client/src/pages/AdminDocuments.tsx`** (new file)
+
+**Features:**
+- View all uploaded documents across all users
+- Filter by user, subject, date, file type
+- Display columns:
+  - Document name
+  - Owner (user)
+  - File size
+  - Upload date
+  - Subject/grade level
+- Actions:
+  - Preview document
+  - Download document
+  - Delete document (with confirmation)
+
+**Storage Analytics:**
+- Total storage used
+- Storage by user
+- Storage trends over time
+
+**Backend API Routes:**
+```
+GET    /api/admin/documents - List all documents
+DELETE /api/admin/documents/:id - Delete document
+GET    /api/admin/documents/analytics - Storage analytics
+```
+
+---
+
+## 7. ElevenLabs Agent Monitoring
+
+**File: `client/src/pages/AdminAgents.tsx`** (new file)
+
+**Features:**
+- View dynamically created agents
+- Display: Agent ID, User, Created date, Status, Documents, Minutes used
+- Actions:
+  - View agent configuration
+  - Delete orphaned agents
+  - Cleanup stale agents
+
+**Monitoring:**
+- Active agent count
+- Total voice minutes used (current month)
+- Cost projection
+
+**Backend API Routes:**
+```
+GET    /api/admin/agents - List all agents
+DELETE /api/admin/agents/:id - Delete agent
+POST   /api/admin/agents/cleanup - Cleanup stale agents
+GET    /api/admin/agents/analytics - Usage analytics
+```
+
+---
+
+## 8. Platform Analytics
+
+**File: `client/src/pages/AdminAnalytics.tsx`** (new file)
+
+**Key Metrics:**
+
+**User Metrics:**
+- Total users (with growth trend)
+- New users this week/month
+- Active users (last 7/30 days)
+- User retention rate
+
+**Usage Metrics:**
+- Total tutoring sessions
+- Average session length
+- Credits used trends
+- Most active subjects
+
+**Financial Metrics:**
+- MRR (Monthly Recurring Revenue)
+- Total revenue (lifetime)
+- Revenue by plan tier
+- Churn rate
+
+**Remarketing Metrics:**
+- Free users (never subscribed)
+- Trial ended (no purchase)
+- Cancelled in last 30 days
+- Inactive 30+ days
+
+**Backend API Routes:**
+```
+GET /api/admin/analytics/users - User analytics
+GET /api/admin/analytics/usage - Usage analytics
+GET /api/admin/analytics/revenue - Revenue analytics
+```
+
+---
+
+## 9. Activity Log / Audit Trail
+
+**Track all admin actions:**
+- User modifications
+- Subscription changes
+- Contact exports (which segment, how many, when)
+- Credit adjustments
+- Account suspensions
+
+**Database Model:**
+```typescript
+AdminLog {
+  id: string
+  adminId: string
+  action: string
+  targetType: 'user' | 'subscription' | 'export' | 'document'
+  targetId: string
+  details: json
+  timestamp: datetime
+}
+```
+
+---
+
+## IMPLEMENTATION PRIORITY ORDER
+
+### Phase 1: Admin Access (Week 1)
+1. ✅ Add `role` field to User model
+2. ✅ Create `make-admin.ts` script
+3. ✅ Create admin authentication middleware
+4. ✅ Create AdminRoute component for frontend protection
+5. ✅ Create basic admin dashboard layout at `/admin`
+
+### Phase 2: Remarketing Tools (Week 1-2) - **PRIORITY**
+1. ✅ Build Contact Management page (`/admin/contacts`)
+2. ✅ Implement all predefined segments with counts
+3. ✅ Build CSV export functionality
+4. ✅ Create suppression list management
+5. ✅ Add campaign tracking
+6. ✅ Test exports with real data
+
+### Phase 3: Core Admin Features (Week 2-3)
+1. ✅ Build user management panel
+2. ✅ Build subscription management panel
+3. ✅ Build basic analytics dashboard
+4. ✅ Add audit logging
+
+### Phase 4: Advanced Features (Week 3-4)
+1. ✅ Build document management panel
+2. ✅ Build agent monitoring panel
+3. ✅ Enhanced analytics
+4. ✅ Mobile responsive design
+
+---
+
+## SECURITY REQUIREMENTS
+
+**Critical:**
+- All admin routes MUST check `req.user.role === 'admin'`
+- Never expose admin APIs to regular users
+- Log all admin actions (especially contact exports)
+- Rate limit admin endpoints
+- Use confirmation dialogs for destructive actions
+- Respect email marketing consent - never export users who opted out
+- GDPR compliance: allow users to opt out of marketing
+- Never expose passwords or API keys in admin views
+
+---
+
+## HOW TO GET STARTED
+
+**Step-by-Step Setup:**
+
+1. **Run the migration to add role field:**
+```bash
+npm run db:migrate
+```
+
+2. **Make yourself an admin:**
+```bash
+# Option A: Run script with your email
+ADMIN_EMAIL=your-email@jiemastery.ai npm run make-admin
+
+# Option B: Manually update in database
+# In your DB tool, run: UPDATE users SET role = 'admin' WHERE email = 'your-email@jiemastery.ai';
+```
+
+3. **Log in to your account** at jiemastery.ai
+
+4. **Navigate to** `jiemastery.ai/admin`
+
+5. **You should see the admin dashboard!**
+
+---
+
+## TESTING CHECKLIST
+
+### Security Tests:
+- [ ] Non-admin users get redirected from `/admin`
+- [ ] Non-admin API requests return 403 error
+- [ ] Admin actions logged to audit trail
+
+### Remarketing Tests:
+- [ ] All segment counts are accurate
+- [ ] CSV exports include correct fields
+- [ ] Suppression list is respected in exports
+- [ ] Users without email consent are excluded
+- [ ] Campaign tracking logs exports correctly
+
+### Functionality Tests:
+- [ ] User CRUD operations work
+- [ ] Subscription modifications work
+- [ ] Credit adjustments reflected immediately
+- [ ] Document deletion works
+- [ ] Agent cleanup syncs with ElevenLabs
+- [ ] Analytics show accurate data
+
+### UI/UX Tests:
+- [ ] Mobile responsive on all admin pages
+- [ ] Loading states for async operations
+- [ ] Error messages are clear
+- [ ] Success confirmations for actions
+
+---
+
+## DELIVERABLES
+
+**Must Have (Priority):**
+1. ✅ Admin authentication & middleware
+2. ✅ Make-admin script
+3. ✅ Admin dashboard layout with navigation
+4. ✅ Contact Management page with segments
+5. ✅ CSV export functionality
+6. ✅ Suppression list management
+7. ✅ Campaign tracking
+8. ✅ User management panel
+9. ✅ Subscription management panel
+10. ✅ Audit logging for sensitive actions
+
+**Nice to Have:**
+11. ✅ Document management
+12. ✅ Agent monitoring
+13. ✅ Advanced analytics
+14. ✅ Email preview before export
+
+---
+
+## NOTES FOR AGENT3
+
+- **Start with remarketing features** - this is the business priority
+- Keep the UI simple and functional
+- CSV exports must be clean and marketing-platform ready
+- Respect email consent at all times
+- Log every contact export for compliance
+- Make segments easy to understand for non-technical admin
+- Add helpful tooltips explaining each segment
+
+**Example Export Button:**
+```tsx
+<button 
+  onClick={() => exportSegment('free-users')}
+  className="btn-primary"
+>
+  Export Free Users
+  <span className="text-sm text-gray-500 ml-2">(287 contacts)</span>
+</button>
+```
+
+Let me know when this is complete!
