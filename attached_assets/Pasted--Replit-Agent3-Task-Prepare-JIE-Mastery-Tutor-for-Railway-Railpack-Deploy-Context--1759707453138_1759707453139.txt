@@ -1,0 +1,459 @@
+# Replit Agent3 — Task: Prepare "JIE Mastery Tutor" for Railway (Railpack) Deploy
+
+**Context**
+
+* App: Node.js + TypeScript + Express serving a static ElevenLabs ConvAI widget page.
+* Goal: Make the repo Railway-ready using **Railpack** and a **/health** endpoint.
+* Repo target (later): `Pollis22/JIE-mastery-tutor` (GitHub push will be done manually by me after you finish).
+
+**Variables (set now)**
+
+* `ELEVEN_AGENT_ID="agent_7301k69kkzbfezhtzh7n2ya9yse0"`  # replace only if I say so
+* `ALLOWLIST="https://*.railway.app"`                        # can add custom domains later
+
+---
+
+## Objectives
+
+1. Add/normalize project files for **TypeScript** build and **Railway** deploy:
+
+   * `package.json` (Node >= 20, build/start scripts)
+   * `tsconfig.json`
+   * `railway.json` with `"builder": "RAILPACK"`
+   * `.gitignore`
+   * `src/index.ts` (Express server, CORS, static serving, `/health`)
+   * `public/index.html` (ConvAI widget with my agent id)
+2. Install dependencies and verify:
+
+   * `npm i` + `npm run build` + `npm start` (Replit will expose a web preview)
+3. Local checks:
+
+   * GET `/health` returns 200 JSON
+   * Root `/` serves the tutor page
+4. Produce a short summary of what changed and any TODOs.
+
+---
+
+## Constraints & Rules
+
+* Use **ES Modules** (`"type": "module"` in package.json; `import` syntax in code).
+* Server must listen on `process.env.PORT` (Railway assigns this).
+* Add robust CORS allowing `https://*.railway.app` by default.
+* Don't commit any real secrets; create `.env.example` only.
+* Keep code minimal and production-safe (no dev-only shortcuts in `production`).
+
+---
+
+## Steps
+
+### 1) Create/Replace Files
+
+**package.json** (create or update; keep other fields if present but ensure these)
+
+```json
+{
+  "name": "jie-mastery-tutor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "engines": { 
+    "node": ">=20.0.0" 
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
+```
+
+**tsconfig.json**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist",
+    "rootDir": "src",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+```
+
+**railway.json** (Railpack - VERIFIED CORRECT FOR 2025)
+
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": { 
+    "builder": "RAILPACK" 
+  },
+  "deploy": {
+    "startCommand": "npm run start",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
+
+**.gitignore**
+
+```
+node_modules/
+dist/
+.env
+.env.local
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+*.db
+*.db-journal
+.replit
+replit.nix
+```
+
+**.env.example**
+
+```bash
+# Server Configuration
+NODE_ENV=production
+PORT=3000
+
+# CORS Configuration
+ALLOWED_ORIGINS=https://*.railway.app
+
+# ElevenLabs Configuration
+ELEVENLABS_CONVAI_AGENT_ID=REPLACE_WITH_AGENT_ID
+
+# Future Phase 2 Variables:
+# OPENAI_API_KEY=
+# DATABASE_URL=file:/data/jie.db
+```
+
+**src/index.ts** (create folders as needed)
+
+```typescript
+import express from "express";
+import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+
+const PORT = Number(process.env.PORT) || 3000;
+const NODE_ENV = process.env.NODE_ENV || "development";
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// CORS with wildcard support (e.g., https://*.railway.app)
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // allow curl/Postman/mobile
+    if (NODE_ENV !== "production") return cb(null, true);
+    
+    const ok = ALLOWED_ORIGINS.some(pattern => {
+      if (!pattern) return false;
+      const esc = pattern
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace("\\*\\.", "([a-z0-9-]+\\.)?");
+      const re = new RegExp(`^${esc}$`, "i");
+      return re.test(origin);
+    });
+    
+    return ok ? cb(null, true) : cb(new Error("Not allowed by CORS"));
+  },
+  credentials: true
+}));
+
+app.disable("x-powered-by");
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// static files (public/)
+app.use(express.static(path.join(__dirname, "../public")));
+
+// health endpoint (REQUIRED for Railway)
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: NODE_ENV
+  });
+});
+
+// demo API endpoint
+app.get("/api/status", (_req, res) => {
+  res.json({ 
+    message: "JIE Mastery Tutor API is running", 
+    version: "1.0.0" 
+  });
+});
+
+// fallback to SPA index for client-side routing
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(__dirname, "../public/index.html"));
+});
+
+// error handling middleware
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error("Error:", err.message);
+  res.status(500).json({ 
+    error: NODE_ENV === "production" ? "Internal server error" : err.message 
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📝 Environment: ${NODE_ENV}`);
+  console.log(`🏥 Health check available at /health`);
+});
+```
+
+**public/index.html**
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JIE Mastery Tutor</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #111831;
+      --ink: #e7ecff;
+      --muted: #a9b7ff;
+      --accent: #667eea;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    html, body {
+      height: 100%;
+    }
+    
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, var(--bg), #0d1530 60%);
+      color: var(--ink);
+    }
+    
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+      width: 100%;
+    }
+    
+    h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      background: linear-gradient(135deg, var(--accent), #764ba2);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    
+    p {
+      color: var(--muted);
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    
+    .note {
+      font-size: 0.875rem;
+      color: var(--muted);
+      margin-top: 16px;
+      padding: 12px;
+      background: rgba(102, 126, 234, 0.1);
+      border-radius: 8px;
+      border-left: 3px solid var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>🎓 JIE Mastery Tutor</h1>
+      <p>
+        Welcome to your personalized JIE tutoring experience. 
+        Click the microphone button below to start a conversation.
+      </p>
+      
+      <!-- ElevenLabs ConvAI Widget -->
+      <!-- Agent3: Replace REPLACED_BY_AGENT3 with the ELEVEN_AGENT_ID value -->
+      <elevenlabs-convai agent-id="REPLACED_BY_AGENT3"></elevenlabs-convai>
+      <script 
+        src="https://unpkg.com/@elevenlabs/convai-widget-embed" 
+        async 
+        type="text/javascript">
+      </script>
+      
+      <div class="note">
+        💡 <strong>Note:</strong> Your browser will request microphone permissions. 
+        This is required for voice interaction.
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+```
+
+> **IMPORTANT**: After creating the file, **replace** `REPLACED_BY_AGENT3` with the value from `ELEVEN_AGENT_ID` variable you set at the top of these instructions.
+
+---
+
+### 2) Install & Build
+
+Run the following commands in sequence:
+
+```bash
+# Install dependencies
+npm install
+
+# Build TypeScript to JavaScript
+npm run build
+
+# Start the production server
+npm start
+```
+
+**Verification in Replit's webview:**
+
+1. Navigate to `/health` → should return JSON: `{"status":"ok","timestamp":"...","uptime":...,"environment":"development"}`
+2. Navigate to `/` → should display the tutor page with the ElevenLabs widget
+3. Navigate to `/api/status` → should return: `{"message":"JIE Mastery Tutor API is running","version":"1.0.0"}`
+
+---
+
+### 3) Set Replit Secrets (for local dev parity)
+
+Add the following Replit Secrets (these will NOT be committed to the repo):
+
+| Secret Name | Value |
+|-------------|-------|
+| `NODE_ENV` | `development` |
+| `ALLOWED_ORIGINS` | `https://*.railway.app` |
+| `ELEVENLABS_CONVAI_AGENT_ID` | (use ELEVEN_AGENT_ID value) |
+
+After adding secrets, restart the Repl if the server doesn't automatically reload.
+
+---
+
+### 4) Final Output for Me
+
+When all tasks are complete, provide a summary including:
+
+**✅ Files Created/Updated:**
+- List each file you created or modified
+- Note if any files already existed and were updated
+
+**🔧 Configuration Details:**
+- Detected start command from package.json
+- Node.js version specified in engines
+- TypeScript compilation output location
+
+**🌐 Testing Results:**
+- Local preview URL you tested
+- Health check endpoint status (200 OK expected)
+- Frontend load status (page visible expected)
+- Any console errors or warnings
+
+**⚠️ Warnings/TODOs:**
+- Any issues encountered during setup
+- Missing dependencies or configuration
+- Next steps before Railway deployment
+
+**Important:** Do **not** push to GitHub. I will review and push manually.
+
+---
+
+## Acceptance Criteria
+
+Before marking this task complete, verify ALL of the following:
+
+- [ ] `npm run build` succeeds and creates `dist/` directory with compiled JavaScript
+- [ ] `npm start` successfully boots server and binds to `process.env.PORT`
+- [ ] Server logs show: `🚀 Server running on port [PORT]`
+- [ ] GET `/health` returns HTTP 200 with JSON: `{"status":"ok",...}`
+- [ ] GET `/` serves the static HTML page successfully
+- [ ] The HTML contains `<elevenlabs-convai agent-id="agent_7301k69kkzbfezhtzh7n2ya9yse0"></elevenlabs-convai>` (with your actual agent ID)
+- [ ] `railway.json` exists with `"builder": "RAILPACK"` and `"healthcheckPath": "/health"`
+- [ ] No secrets are committed (`.env` is in `.gitignore`, only `.env.example` exists)
+- [ ] TypeScript compiles without errors
+- [ ] CORS middleware is properly configured for wildcard Railway domains
+
+---
+
+## Troubleshooting Common Issues
+
+**If build fails:**
+- Ensure all TypeScript files are in `src/` directory
+- Check for syntax errors in `tsconfig.json`
+- Verify all dependencies are installed: `npm install`
+
+**If server won't start:**
+- Check that `dist/index.js` exists after build
+- Verify `package.json` has correct `"start": "node dist/index.js"`
+- Ensure no port conflicts (Replit assigns PORT automatically)
+
+**If health check fails:**
+- Confirm `/health` route exists in `src/index.ts`
+- Check server logs for errors
+- Test with: `curl http://localhost:${PORT}/health`
+
+**If CORS errors occur:**
+- Verify `ALLOWED_ORIGINS` is set in Replit Secrets
+- Check CORS middleware is applied before routes
+- Test origin matching logic in development mode
+
+---
+
+**End of Agent3 Task Instructions**
+
+Once complete, await my review before GitHub push. 🚀
