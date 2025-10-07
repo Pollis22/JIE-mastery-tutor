@@ -1,0 +1,359 @@
+# AGENT 3: Fix Railway Healthcheck Failure
+
+## Problem
+Railway deployment is failing at the "Network > Healthcheck" stage. The healthcheck is looking for `/api/health` endpoint but it doesn't exist in the code.
+
+---
+
+## SOLUTION: Add Health Check Endpoint
+
+### Step 1: Add Health Endpoint to Server
+
+**Find your main server file** (likely `server/index.js` or `server/server.js`)
+
+**Add this code EARLY in the file, right after creating the Express app and BEFORE any other routes:**
+
+```javascript
+// Health check endpoint - MUST be early in the file
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Simple root health check too
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+```
+
+**Example of where to place it:**
+
+```javascript
+const express = require('express');
+const app = express();
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ✅ ADD HEALTH CHECKS HERE - BEFORE OTHER ROUTES
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// ❌ DON'T add them after this point
+// Your other routes below...
+app.use('/api', require('./routes'));
+
+// Static files
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../dist')));
+  // ... rest of static serving
+}
+
+// Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+```
+
+---
+
+### Step 2: Verify Server Binds Correctly
+
+**Make sure your server is binding to the correct host and port:**
+
+```javascript
+const PORT = process.env.PORT || 5000;
+
+// ✅ CORRECT - Must bind to 0.0.0.0 for Railway
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV}`);
+  console.log(`Health check available at /api/health`);
+});
+
+// ❌ WRONG - Don't use localhost
+// app.listen(PORT, 'localhost', ...)
+```
+
+---
+
+### Step 3: Ensure Railway Configuration is Correct
+
+**Check `railway.json` file** (should exist in root directory):
+
+```json
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "node server/index.js",
+    "healthcheckPath": "/api/health",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
+```
+
+**If this file doesn't exist, create it.**
+
+**If it exists but has different settings, update the `healthcheckPath` to `/api/health`**
+
+---
+
+### Step 4: Verify Package.json Scripts
+
+**Check `package.json` has the correct start command:**
+
+```json
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "db:migrate": "drizzle-kit push:pg"
+  }
+}
+```
+
+**Make sure `start` uses `node server/index.js` NOT `npm run dev`**
+
+---
+
+### Step 5: Add Error Handling
+
+**Add graceful error handling to prevent crashes:**
+
+```javascript
+// At the bottom of your server file
+
+// Handle unhandled rejections
+process.on('unhandledRejection', (err) => {
+  console.error('❌ Unhandled Promise Rejection:', err);
+  // Don't exit in production, just log
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  // Give time to log, then exit
+  setTimeout(() => process.exit(1), 1000);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+```
+
+---
+
+## COMPLETE WORKING SERVER EXAMPLE
+
+Here's a complete, Railway-ready server file:
+
+```javascript
+const express = require('express');
+const path = require('path');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+// Middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// CORS
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  credentials: true
+}));
+
+// ✅ HEALTH CHECK ENDPOINTS - FIRST!
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+// Root endpoint
+app.get('/api', (req, res) => {
+  res.json({ 
+    message: 'TutorMind API is running',
+    version: '1.0.0'
+  });
+});
+
+// API routes
+try {
+  const apiRoutes = require('./routes');
+  app.use('/api', apiRoutes);
+} catch (err) {
+  console.error('⚠️  Failed to load API routes:', err.message);
+}
+
+// Serve static files in production
+if (process.env.NODE_ENV === 'production') {
+  const distPath = path.join(__dirname, '../dist');
+  const fs = require('fs');
+  
+  if (fs.existsSync(distPath)) {
+    app.use(express.static(distPath, {
+      maxAge: '1h',
+      etag: true
+    }));
+    
+    // SPA fallback - catch all routes
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
+    console.error('⚠️  WARNING: dist folder not found at', distPath);
+  }
+}
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('❌ Error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+
+// Start server - MUST bind to 0.0.0.0 for Railway
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('=================================');
+  console.log('✅ Server started successfully');
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🏥 Health check: /api/health`);
+  console.log('=================================');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, closing server...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+// Error handlers
+process.on('unhandledRejection', (err) => {
+  console.error('❌ Unhandled Promise Rejection:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  setTimeout(() => process.exit(1), 1000);
+});
+
+module.exports = app;
+```
+
+---
+
+## CHECKLIST FOR AGENT 3
+
+After making changes, verify:
+
+- [ ] Health endpoint `/api/health` added to server
+- [ ] Server binds to `0.0.0.0` not `localhost`
+- [ ] `PORT` uses `process.env.PORT`
+- [ ] `package.json` start script is `node server/index.js`
+- [ ] `railway.json` exists with correct settings
+- [ ] Error handling added
+- [ ] Code committed to GitHub
+- [ ] No syntax errors in server file
+
+---
+
+## COMMIT AND PUSH
+
+After making all changes:
+
+```bash
+git add .
+git commit -m "Fix Railway healthcheck - add /api/health endpoint"
+git push origin main
+```
+
+Railway will automatically detect the push and redeploy.
+
+---
+
+## VERIFICATION
+
+After Railway redeploys, the deployment should show:
+
+✅ Initialization (00:05)
+✅ Build (01:30)
+✅ Deploy (00:15)
+✅ **Network > Healthcheck** ← Should PASS now!
+✅ Post-deploy
+
+---
+
+## IF STILL FAILING
+
+If it still fails after these changes:
+
+1. Go to Railway → Deployments → Failed deployment
+2. Click "View logs" 
+3. Look for these messages:
+   - "Server running on port..."
+   - Any error messages
+   - Database connection errors
+4. Share the last 30 lines of Deploy Logs for further debugging
+
+---
+
+## TESTING LOCALLY
+
+Before deploying, test the health endpoint locally:
+
+```bash
+# Start your server
+npm start
+
+# In another terminal, test the endpoint
+curl http://localhost:5000/api/health
+
+# Should return:
+# {"status":"ok","timestamp":"2024-10-07T...","uptime":5.123}
+```
+
+If this works locally, it will work on Railway.
+
+---
+
+**Make these changes, commit, push, and Railway will auto-deploy. The healthcheck should pass!**
